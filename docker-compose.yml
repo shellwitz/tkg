@@ -1,0 +1,17 @@
+services:
+  tkg-neo4j:
+    build: .
+    container_name: tkg-neo4j
+    ports:
+      - "7475:7474"  # Browser
+      - "7688:7687"  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/passworty
+      - NEO4JLABS_PLUGINS=["graph-data-science"]
+      - NEO4J_dbms_security_procedures_unrestricted=gds.*
+      - NEO4J_dbms_security_procedures_allowlist=gds.*
+    volumes:
+      - tkg:/data
+
+volumes:
+  tkg:
