@@ -182,76 +182,84 @@ def _entity_type_strict_dedup() -> bool:
     }
 
 
-def upsert_entity(tx, entity: ExtractedEntity) -> str:
+TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+def _tokens(s: str) -> set[str]:
+    s = (s or "").lower()
+    return set(TOKEN_RE.findall(s))
+
+def _iou(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    return inter / union
+
+def upsert_entity(tx, entity) -> str:
+    # 1) BM25 recall only (no threshold); take top-K
+    K = 10
     query = """
     CALL db.index.fulltext.queryNodes('entity_name_aliases', $query_text)
     YIELD node, score
     WHERE ($type_strict = false OR node.entity_type = $entity_type)
     RETURN node, score
     ORDER BY score DESC
-    LIMIT 1
+    LIMIT $k
     """
-    bm25_threshold = _entity_bm25_threshold()
-    result = tx.run(
+    rows = list(tx.run(
         query,
         query_text=_escape_lucene_query(entity.name),
         entity_type=entity.entity_type,
         type_strict=_entity_type_strict_dedup(),
-    )
-    row = result.single()
-    if row and row["score"] >= bm25_threshold:
-        node = row["node"]
-        entity_id = node["entity_id"]
-        aliases = set(node.get("aliases") or [])
+        k=K,
+    ))
 
-        print(f"Found existing entity with high BM25 score: {entity.name} (aliases: {aliases})")
+    # 2) IoU gate on names (and optionally aliases)
+    incoming_toks = _tokens(entity.name)
 
-        if entity.name not in aliases and entity.name != node.get("name"):
+    best = None
+    best_iou = 0.0
+
+    for r in rows:
+        node = r["node"]
+        name_toks = _tokens(node.get("name", ""))
+        iou_name = _iou(incoming_toks, name_toks)
+
+        # optional: also compare against aliases to allow "NYC" vs "New York City"
+        aliases = node.get("aliases") or []
+        iou_alias = 0.0
+        for a in aliases:
+            iou_alias = max(iou_alias, _iou(incoming_toks, _tokens(a)))
+
+        iou = max(iou_name, iou_alias)
+
+        if iou > best_iou:
+            best_iou = iou
+            best = node
+
+    IOU_THRESHOLD = 0.5  # tune: 0.5–0.8 typical for entity names
+
+    if best and best_iou >= IOU_THRESHOLD:
+        entity_id = best["entity_id"]
+        aliases = set(best.get("aliases") or [])
+
+        # update aliases
+        if entity.name != best.get("name") and entity.name not in aliases:
             aliases.add(entity.name)
             tx.run(
                 "MATCH (e:Entity {entity_id: $id}) SET e.aliases = $aliases",
                 id=entity_id,
-                aliases=list(aliases),
+                aliases=sorted(aliases),
             )
+
+        print(f"Merged by IoU={best_iou:.2f}: '{entity.name}' -> '{best.get('name')}'")
         return entity_id
 
-    
-    entity_embedding = embed_entity_text(entity.name, "" 
-                                         #entity.description 
-                                         ) # dont use description for now as persons with different names get merged :(
-    vector_query = """
-    CALL db.index.vector.queryNodes('entity_embedding', $k, $embedding)
-    YIELD node, score
-    WHERE ($type_strict = false OR node.entity_type = $entity_type)
-    RETURN node, score
-    ORDER BY score DESC
-    LIMIT 1
-    """
-    result = tx.run(
-        vector_query,
-        k=_entity_vector_k(),
-        embedding=entity_embedding,
-        entity_type=entity.entity_type,
-        type_strict=_entity_type_strict_dedup(),
-    )
-    row = result.single()
-    if row and row["score"] >= _entity_vector_threshold():
-        node = row["node"]
-        entity_id = node["entity_id"]
-        aliases = set(node.get("aliases") or [])
-
-        print(f"Found existing entity with high vector score: {entity.name} (aliases: {aliases})")
-
-        if entity.name not in aliases and entity.name != node.get("name"):
-            aliases.add(entity.name)
-            tx.run(
-                "MATCH (e:Entity {entity_id: $id}) SET e.aliases = $aliases",
-                id=entity_id,
-                aliases=list(aliases),
-            )
-        return entity_id
-
+    # 3) create new if no good lexical overlap
     entity_id = str(uuid.uuid4())
+    embedding = embed_entity_text(entity.name, "")
     tx.run(
         """
         CREATE (e:Entity {
@@ -270,7 +278,7 @@ def upsert_entity(tx, entity: ExtractedEntity) -> str:
         description=entity.description,
         normalized_name=_normalize_name(entity.name),
         aliases=[entity.name],
-        embedding=entity_embedding,
+        embedding=embedding,
     )
     return entity_id
 
