@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from neo4j import GraphDatabase
 
 import prompts
+from llm_client import openai_client
 from settings import (
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
@@ -71,37 +72,22 @@ def chunk_text(text: str, max_chars: int = 1600, overlap: int = 200) -> List[str
 def _build_extraction_prompts() -> Tuple[str, str, Dict[str, str]]:
     tuple_delimiter = "|"
     record_delimiter = ";;"
-    completion_delimiter = "<<END>>"
     system_prompt = prompts.TEMPORAL_ENTITY_EXTRACTION_SYS_PROMPT.format(
         entity_types=", ".join(ENTITY_TYPES),
         tuple_delimiter=tuple_delimiter,
         record_delimiter=record_delimiter,
-        completion_delimiter=completion_delimiter,
         timestamp_types=", ".join(DEFAULT_TIME_TYPES),
         timestamp_format=DEFAULT_TIMESTAMP_FORMAT,
     )
     return system_prompt, prompts.TEMPORAL_ENTITY_EXTRACTION_FOLLOWUP_PROMPT, {
         "tuple_delimiter": tuple_delimiter,
         "record_delimiter": record_delimiter,
-        "completion_delimiter": completion_delimiter,
     }
-
-
-def _openai_client():
-    api_key = os.getenv("MODEL_API_KEY", "")
-    base_url = os.getenv("MODEL_BASE_URL", "") or None
-    if not api_key:
-        raise RuntimeError("MODEL_API_KEY is required for LLM/embedding calls.")
-    try:
-        from openai import OpenAI
-    except ImportError as exc:
-        raise RuntimeError("openai package is required. Install it to run ingestion.") from exc
-    return OpenAI(api_key=api_key, base_url=base_url)
 
 
 def extract_entities_and_relations(text: str) -> Tuple[List[ExtractedEntity], List[ExtractedRelation]]:
     system_prompt, user_prompt_template, delimiters = _build_extraction_prompts()
-    client = _openai_client()
+    client = openai_client()
     if not LLM_MODEL:
         raise RuntimeError("LLM_MODEL is not set.")
     user_prompt = user_prompt_template.format(entity_types=", ".join(ENTITY_TYPES), input_text=text)
@@ -217,6 +203,9 @@ def upsert_entity(tx, entity: ExtractedEntity) -> str:
         node = row["node"]
         entity_id = node["entity_id"]
         aliases = set(node.get("aliases") or [])
+
+        print(f"Found existing entity with high BM25 score: {entity.name} (aliases: {aliases})")
+
         if entity.name not in aliases and entity.name != node.get("name"):
             aliases.add(entity.name)
             tx.run(
@@ -248,6 +237,9 @@ def upsert_entity(tx, entity: ExtractedEntity) -> str:
         node = row["node"]
         entity_id = node["entity_id"]
         aliases = set(node.get("aliases") or [])
+
+        print(f"Found existing entity with high vector score: {entity.name} (aliases: {aliases})")
+
         if entity.name not in aliases and entity.name != node.get("name"):
             aliases.add(entity.name)
             tx.run(
@@ -347,7 +339,9 @@ def create_relationship(
 def embed_texts(
     texts: List[str], model: Optional[str] = None, expected_dim: Optional[int] = None
 ) -> List[List[float]]:
-    client = _openai_client()
+    api_key_env = "EMBEDDING_API_KEY" if os.getenv("EMBEDDING_API_KEY") else "MODEL_API_KEY"
+    base_url_env = "EMBEDDING_BASE_URL" if os.getenv("EMBEDDING_BASE_URL") else "MODEL_BASE_URL"
+    client = openai_client(api_key_env=api_key_env, base_url_env=base_url_env)
     model = model or EMBEDDING_MODEL
     expected_dim = expected_dim or EMBEDDING_DIM
     if not model:
@@ -373,6 +367,9 @@ def embed_entity_text(name: str, description: str) -> List[float]:
 
 def ingest_text(text: str, source_id: Optional[str] = None) -> Dict[str, int]:
     chunks = chunk_text(text)
+
+    print("got chunks:", len(chunks))
+
     if not chunks:
         return {"chunks": 0, "entities": 0, "relations": 0}
 
@@ -381,9 +378,17 @@ def ingest_text(text: str, source_id: Optional[str] = None) -> Dict[str, int]:
     driver = _neo4j_driver()
     totals = {"chunks": 0, "entities": 0, "relations": 0}
 
+    i = 0
+
     with driver.session() as session:
         for chunk, embedding in zip(chunks, embeddings):
+            i += 1
             extracted_entities, extracted_relations = extract_entities_and_relations(chunk)
+
+            if i % 5 == 0:
+                print(f"made {i} llm calls")
+                print(f"ingesting chunk {i}/{len(chunks)}: {len(extracted_entities)} entities, {len(extracted_relations)} relations")
+
             timestamp_ranges = {
                 e.name: parse_timestamp_range(e.name)
                 for e in extracted_entities
@@ -424,17 +429,3 @@ def ingest_text(text: str, source_id: Optional[str] = None) -> Dict[str, int]:
 
     driver.close()
     return totals
-
-
-def main() -> None:
-    input_path = os.getenv("INGEST_PATH", "")
-    if not input_path:
-        raise RuntimeError("Set INGEST_PATH to a text file to ingest.")
-    with open(input_path, "r", encoding="utf-8") as handle:
-        text = handle.read()
-    result = ingest_text(text, source_id=os.getenv("SOURCE_ID"))
-    print(json.dumps(result, indent=2))
-
-
-if __name__ == "__main__":
-    main()

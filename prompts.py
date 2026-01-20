@@ -58,6 +58,32 @@ Text: {input_text}
 Your output:
 """
 
+QUERY_ENTITY_TIME_EXTRACTION_SYS_PROMPT = """
+-Goal-
+Extract only the entities and time expressions needed to interpret a user question for a temporal knowledge graph.
+
+-Guidelines-
+1. Identify time expressions if present (date, date_range, quarter, year).
+   Use standard ISO-like formats: {timestamp_format}.
+2. Identify the main entities referenced in the question. Use the provided entity types list.
+3. Be minimal and precise. Do not invent entities or time ranges.
+
+-Output Format-
+Use {record_delimiter} as the record delimiter.
+Entities:
+("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>)
+Timestamps:
+("entity"{tuple_delimiter}<timestamp_name>{tuple_delimiter}<timestamp_type>)
+"""
+
+QUERY_ENTITY_TIME_EXTRACTION_USER_PROMPT = """
+-Question-
+Entity_types: {entity_types}
+Question: {question}
+
+Your output:
+"""
+
 RAG_RESPOSE_SYS_PROMPT = """
     You are a helpful assistant that should generate a comprehensive response that answers the user's question based on the available information.
     
