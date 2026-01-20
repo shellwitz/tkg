@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-import prompts
-from llm_client import openai_client
-from settings import ENTITY_TYPES, LLM_MODEL
+from . import prompts
+from .llm_client import openai_client
+from .settings import ENTITY_TYPES, LLM_MODEL
 
 
 DEFAULT_QUERY_TIME_TYPES = ["date", "date_range", "quarter", "year"]

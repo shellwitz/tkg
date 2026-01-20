@@ -7,9 +7,9 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from neo4j import GraphDatabase
 
-import prompts
-from llm_client import openai_client
-from settings import (
+from . import prompts
+from .llm_client import openai_client
+from .settings import (
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
     ENTITY_EMBEDDING_DIM,
@@ -167,7 +167,7 @@ def _entity_bm25_threshold() -> float:
 
 
 def _entity_vector_threshold() -> float:
-    return float(os.getenv("ENTITY_VECTOR_THRESHOLD", "0.85"))
+    return float(os.getenv("ENTITY_VECTOR_THRESHOLD", "0.9"))
 
 
 def _entity_vector_k() -> int:
@@ -216,7 +216,9 @@ def upsert_entity(tx, entity: ExtractedEntity) -> str:
         return entity_id
 
     
-    entity_embedding = embed_entity_text(entity.name, entity.description)
+    entity_embedding = embed_entity_text(entity.name, "" 
+                                         #entity.description 
+                                         ) # dont use description for now as persons with different names get merged :(
     vector_query = """
     CALL db.index.vector.queryNodes('entity_embedding', $k, $embedding)
     YIELD node, score

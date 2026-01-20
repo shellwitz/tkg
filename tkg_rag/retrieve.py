@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from ingest import (
+from .ingest import (
     TimestampRange,
     _escape_lucene_query,
     _entity_bm25_threshold,
@@ -14,7 +14,7 @@ from ingest import (
     embed_entity_text,
     parse_timestamp_range,
 )
-from query_extraction import QueryEntity, extract_query_entities, is_time_entity
+from .query_extraction import QueryEntity, extract_query_entities, is_time_entity
 
 
 @dataclass
