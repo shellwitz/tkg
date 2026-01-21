@@ -24,10 +24,9 @@ until cypher-shell -a "bolt://localhost:7687" \
 done
 
 EMBEDDING_DIM="${EMBEDDING_DIM:-3072}"
-ENTITY_EMBEDDING_DIM="${ENTITY_EMBEDDING_DIM:-${EMBEDDING_DIM}}"
 TEMP_SCHEMA="/tmp/schema.cypher"
 
-echo "Preparing schema with vector indexes (EMBEDDING_DIM=${EMBEDDING_DIM}, ENTITY_EMBEDDING_DIM=${ENTITY_EMBEDDING_DIM})..."
+echo "Preparing schema with vector indexes (EMBEDDING_DIM=${EMBEDDING_DIM})..."
 cp /init/schema.cypher "$TEMP_SCHEMA"
 cat >>"$TEMP_SCHEMA" <<EOF
 
@@ -42,13 +41,13 @@ OPTIONS {
   }
 };
 
-// Vector index for entity embeddings (generated at runtime)
-CREATE VECTOR INDEX entity_embedding IF NOT EXISTS
-FOR (e:Entity)
-ON (e.embedding)
+// Vector index for relation embeddings (generated at runtime)
+CREATE VECTOR INDEX relation_embedding IF NOT EXISTS
+FOR ()-[r:RELATED_TO]-()
+ON (r.relation_embedding)
 OPTIONS {
   indexConfig: {
-    \`vector.dimensions\`: ${ENTITY_EMBEDDING_DIM},
+    \`vector.dimensions\`: ${EMBEDDING_DIM},
     \`vector.similarity_function\`: 'cosine'
   }
 };

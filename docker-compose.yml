@@ -1,6 +1,9 @@
 services:
   tkg-neo4j:
-    build: .
+    build:
+      context: .
+      args:
+        GDS_JAR_URL: ${GDS_JAR_URL:-https://graphdatascience.ninja/neo4j-graph-data-science-2.13.7.jar}
     container_name: tkg-neo4j
     ports:
       - "${NEO4J_BROWSER_PORT:-7475}:7474"  # Browser
@@ -9,7 +12,6 @@ services:
       - NEO4J_AUTH=${TKG_NEO4J_USER:-neo4j}/${TKG_NEO4J_PASSWORD:-passworty}
       - TKG_NEO4J_USER=${TKG_NEO4J_USER:-neo4j}
       - TKG_NEO4J_PASSWORD=${TKG_NEO4J_PASSWORD:-passworty}
-      - NEO4J_PLUGINS=["graph-data-science"]
       - NEO4J_dbms_security_procedures_unrestricted=gds.*
       - NEO4J_dbms_security_procedures_allowlist=gds.*
       - EMBEDDING_DIM=${EMBEDDING_DIM:-3072}

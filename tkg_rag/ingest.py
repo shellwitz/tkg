@@ -9,14 +9,8 @@ from neo4j import GraphDatabase
 
 from . import prompts
 from .llm_client import openai_client
-from .settings import (
-    EMBEDDING_DIM,
-    EMBEDDING_MODEL,
-    ENTITY_EMBEDDING_DIM,
-    ENTITY_EMBEDDING_MODEL,
-    LLM_MODEL,
-    ENTITY_TYPES,
-)
+from .settings import EMBEDDING_DIM, EMBEDDING_MODEL, ENTITY_TYPES, LLM_MODEL
+from .text_utils import iou, tokens
 
 
 @dataclass
@@ -162,18 +156,6 @@ def _escape_lucene_query(text: str) -> str:
     return re.sub(r'([+\-!(){}[\]^"~*?:\\/]|&&|\|\|)', r"\\\1", text)
 
 
-def _entity_bm25_threshold() -> float:
-    return float(os.getenv("ENTITY_BM25_THRESHOLD", os.getenv("ENTITY_DEDUP_SCORE", "0.75")))
-
-
-def _entity_vector_threshold() -> float:
-    return float(os.getenv("ENTITY_VECTOR_THRESHOLD", "0.9"))
-
-
-def _entity_vector_k() -> int:
-    return int(os.getenv("ENTITY_VECTOR_K", "3"))
-
-
 def _entity_type_strict_dedup() -> bool:
     return os.getenv("ENTITY_DEDUP_TYPE_STRICT", "true").strip().lower() in {
         "1",
@@ -182,23 +164,7 @@ def _entity_type_strict_dedup() -> bool:
     }
 
 
-TOKEN_RE = re.compile(r"[a-z0-9]+")
-
-def _tokens(s: str) -> set[str]:
-    s = (s or "").lower()
-    return set(TOKEN_RE.findall(s))
-
-def _iou(a: set[str], b: set[str]) -> float:
-    if not a and not b:
-        return 1.0
-    if not a or not b:
-        return 0.0
-    inter = len(a & b)
-    union = len(a | b)
-    return inter / union
-
-def upsert_entity(tx, entity) -> str:
-    # 1) BM25 recall only (no threshold); take top-K
+def search_entity_by_bm25_and_iou(tx, entity) -> Tuple[Optional[dict], float]:
     K = 10
     query = """
     CALL db.index.fulltext.queryNodes('entity_name_aliases', $query_text)
@@ -216,28 +182,32 @@ def upsert_entity(tx, entity) -> str:
         k=K,
     ))
 
-    # 2) IoU gate on names (and optionally aliases)
-    incoming_toks = _tokens(entity.name)
+    incoming_toks = tokens(entity.name)
 
     best = None
     best_iou = 0.0
 
     for r in rows:
         node = r["node"]
-        name_toks = _tokens(node.get("name", ""))
-        iou_name = _iou(incoming_toks, name_toks)
 
-        # optional: also compare against aliases to allow "NYC" vs "New York City"
         aliases = node.get("aliases") or []
         iou_alias = 0.0
         for a in aliases:
-            iou_alias = max(iou_alias, _iou(incoming_toks, _tokens(a)))
+            alias_toks = tokens(a)
+            if len(aliases) > 1 and len(alias_toks) ==1:
+                continue  # skip single-token aliases if multiple aliases exist.
+                # EOG Resources Inc -> EOG Resources -> EOG shouldnt further match -> EOG Burgers or so
+            iou_alias = max(iou_alias, iou(incoming_toks, alias_toks))
 
-        iou = max(iou_name, iou_alias)
 
-        if iou > best_iou:
-            best_iou = iou
+        if iou_alias > best_iou:
+            best_iou = iou_alias
             best = node
+
+    return best, best_iou
+
+def upsert_entity(tx, entity) -> str:
+    best, best_iou = search_entity_by_bm25_and_iou(tx, entity)
 
     IOU_THRESHOLD = 0.5  # tune: 0.5–0.8 typical for entity names
 
@@ -259,7 +229,6 @@ def upsert_entity(tx, entity) -> str:
 
     # 3) create new if no good lexical overlap
     entity_id = str(uuid.uuid4())
-    embedding = embed_entity_text(entity.name, "")
     tx.run(
         """
         CREATE (e:Entity {
@@ -268,8 +237,7 @@ def upsert_entity(tx, entity) -> str:
           entity_type: $entity_type,
           description: $description,
           normalized_name: $normalized_name,
-          aliases: $aliases,
-          embedding: $embedding
+          aliases: $aliases
         })
         """,
         entity_id=entity_id,
@@ -278,7 +246,6 @@ def upsert_entity(tx, entity) -> str:
         description=entity.description,
         normalized_name=_normalize_name(entity.name),
         aliases=[entity.name],
-        embedding=embedding,
     )
     return entity_id
 
@@ -326,6 +293,8 @@ def create_relationship(
     source_entity_id: str,
     target_entity_id: str,
     relation_text: str,
+    relation_embedding: List[float],
+    chunk_id: str,
     start_date: Optional[str],
     end_date: Optional[str],
 ) -> None:
@@ -335,12 +304,16 @@ def create_relationship(
         MATCH (t:Entity {entity_id: $target_entity_id})
         MERGE (s)-[r:RELATED_TO {source_id: $source_id, relation_text: $relation_text}]->(t)
         SET r.start_date = $start_date,
-            r.end_date = $end_date
+            r.end_date = $end_date,
+            r.chunk_id = $chunk_id,
+            r.relation_embedding = $relation_embedding
         """,
         source_entity_id=source_entity_id,
         target_entity_id=target_entity_id,
         source_id=source_id,
         relation_text=relation_text,
+        relation_embedding=relation_embedding,
+        chunk_id=chunk_id,
         start_date=start_date,
         end_date=end_date,
     )
@@ -364,15 +337,6 @@ def embed_texts(
                 f"Embedding dimension mismatch: expected {expected_dim}, got {len(vec)}"
             )
     return vectors
-
-
-def embed_entity_text(name: str, description: str) -> List[float]:
-    if not ENTITY_EMBEDDING_MODEL:
-        raise RuntimeError("ENTITY_EMBEDDING_MODEL is not set.")
-    text = name.strip()
-    if description:
-        text = f"{text}\n{description.strip()}"
-    return embed_texts([text], model=ENTITY_EMBEDDING_MODEL, expected_dim=ENTITY_EMBEDDING_DIM)[0]
 
 
 def ingest_text(text: str, source_id: Optional[str] = None) -> Dict[str, int]:
@@ -415,7 +379,14 @@ def ingest_text(text: str, source_id: Optional[str] = None) -> Dict[str, int]:
                     entity_ids[entity.name] = entity_id
                 link_chunk_mentions(tx, chunk_id, entity_ids.values())
 
+                relation_embeddings: List[List[float]] = []
+                if extracted_relations:
+                    relation_texts = [rel.description or "" for rel in extracted_relations]
+                    relation_embeddings = embed_texts(relation_texts)
+                relation_embedding_iter = iter(relation_embeddings)
+
                 for rel in extracted_relations:
+                    relation_embedding = next(relation_embedding_iter)
                     src_id = entity_ids.get(rel.source_entity)
                     tgt_id = entity_ids.get(rel.target_entity)
                     if not src_id or not tgt_id:
@@ -427,6 +398,8 @@ def ingest_text(text: str, source_id: Optional[str] = None) -> Dict[str, int]:
                         src_id,
                         tgt_id,
                         rel.description,
+                        relation_embedding,
+                        chunk_id,
                         tr.start_date,
                         tr.end_date,
                     )

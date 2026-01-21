@@ -69,11 +69,16 @@ Extract only the entities and time expressions needed to interpret a user questi
 3. Be minimal and precise. Do not invent entities or time ranges.
 
 -Output Format-
-Use {record_delimiter} as the record delimiter.
-Entities:
-("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>)
-Timestamps:
-("entity"{tuple_delimiter}<timestamp_name>{tuple_delimiter}<timestamp_type>)
+Return ONLY a flat list of tuples. Do NOT add section labels like "Entities:" or "Timestamps:".
+Separate each tuple with {record_delimiter}.
+Tuple format:
+("entity"{tuple_delimiter}<name>{tuple_delimiter}<type>)
+
+-Example Query and Output-
+Query: "What did Microsoft report in Q1 2020?"
+Output:
+("entity"{tuple_delimiter}"Microsoft"{tuple_delimiter}"company"){record_delimiter}
+("entity"{tuple_delimiter}"2020-Q1"{tuple_delimiter}"quarter")
 """
 
 QUERY_ENTITY_TIME_EXTRACTION_USER_PROMPT = """

@@ -21,16 +21,9 @@ def main() -> None:
         default="What happened in 2020 Q1 related to Crocs?",
         help="User question to query the KG.",
     )
-    parser.add_argument(
-        "-k",
-        "--max-edges",
-        type=int,
-        default=25,
-        help="Max edges to return from retrieval.",
-    )
     args = parser.parse_args()
 
-    payload = retrieve(args.question, max_edges=args.max_edges)
+    payload = retrieve(args.question)
     print("Context:\n")
     print(payload["context"])
     print("\nAnswer:\n")

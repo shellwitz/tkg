@@ -1,37 +1,16 @@
 import os
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .ingest import (
     TimestampRange,
-    _escape_lucene_query,
-    _entity_bm25_threshold,
     _entity_type_strict_dedup,
-    _entity_vector_k,
-    _entity_vector_threshold,
+    _escape_lucene_query,
     _neo4j_driver,
     embed_texts,
-    embed_entity_text,
     parse_timestamp_range,
 )
 from .query_extraction import QueryEntity, extract_query_entities, is_time_entity
-
-
-@dataclass
-class LinkedEntity:
-    entity_id: str
-    name: str
-    entity_type: str
-    score: float
-    method: str
-
-
-def _retrieval_bm25_threshold() -> float:
-    return float(os.getenv("RETRIEVAL_ENTITY_BM25_THRESHOLD", _entity_bm25_threshold()))
-
-
-def _retrieval_vector_threshold() -> float:
-    return float(os.getenv("RETRIEVAL_ENTITY_VECTOR_THRESHOLD", _entity_vector_threshold()))
+from .text_utils import iou, tokens
 
 
 def _chunk_vector_k() -> int:
@@ -39,7 +18,35 @@ def _chunk_vector_k() -> int:
 
 
 def _chunk_vector_threshold() -> float:
-    return float(os.getenv("CHUNK_VECTOR_THRESHOLD", "0.0"))
+    return float(os.getenv("CHUNK_VECTOR_THRESHOLD", "0.7"))
+
+
+def _relation_vector_k() -> int:
+    return int(os.getenv("RELATION_VECTOR_K", "12"))
+
+
+def _relation_vector_threshold() -> float:
+    return float(os.getenv("RELATION_VECTOR_THRESHOLD", "0.0"))
+
+
+def _ppr_damping() -> float:
+    return float(os.getenv("PPR_DAMPING", "0.85"))
+
+
+def _ppr_max_iter() -> int:
+    return int(os.getenv("PPR_MAX_ITER", "20"))
+
+
+def _rrf_k() -> int:
+    return int(os.getenv("RRF_K", "60"))
+
+
+def _entity_bm25_k() -> int:
+    return int(os.getenv("ENTITY_BM25_K", "5"))
+
+
+def _entity_iou_threshold() -> float:
+    return float(os.getenv("ENTITY_IOU_THRESHOLD", "0.5"))
 
 
 def _merge_time_ranges(ranges: List[TimestampRange]) -> TimestampRange:
@@ -58,81 +65,45 @@ def extract_query_entities_and_time(question: str) -> Tuple[List[QueryEntity], T
     return non_time_entities, time_range
 
 
-def _link_entity_bm25(tx, entity: QueryEntity, k: int = 1) -> Optional[LinkedEntity]:
+def _time_overlaps(start_date: Optional[str], end_date: Optional[str], time_range: TimestampRange) -> bool:
+    if not time_range.start_date and not time_range.end_date:
+        return True
+    if time_range.start_date and end_date and end_date < time_range.start_date:
+        return False
+    if time_range.end_date and start_date and start_date > time_range.end_date:
+        return False
+    return True
+
+
+def search_relations(
+    tx,
+    query_embedding: List[float],
+    k: int,
+    min_score: float,
+) -> List[Dict[str, object]]:
     query = """
-    CALL db.index.fulltext.queryNodes('entity_name_aliases', $query_text)
-    YIELD node, score
-    WHERE ($type_strict = false OR node.entity_type = $entity_type)
-    RETURN node, score
+    CALL db.index.vector.queryRelationships('relation_embedding', $k, $embedding)
+    YIELD relationship, score
+    WHERE score >= $min_score
+    RETURN id(relationship) AS rel_id,
+           score AS similarity,
+           relationship.relation_text AS relation_text,
+           relationship.start_date AS start_date,
+           relationship.end_date AS end_date,
+           relationship.source_id AS source_id,
+           relationship.chunk_id AS chunk_id,
+           id(startNode(relationship)) AS source_node_id,
+           id(endNode(relationship)) AS target_node_id,
+           startNode(relationship).entity_id AS source_entity_id,
+           endNode(relationship).entity_id AS target_entity_id,
+           startNode(relationship).name AS source_name,
+           endNode(relationship).name AS target_name,
+           startNode(relationship).entity_type AS source_type,
+           endNode(relationship).entity_type AS target_type
     ORDER BY score DESC
-    LIMIT $k
     """
-    result = tx.run(
-        query,
-        query_text=_escape_lucene_query(entity.name),
-        entity_type=entity.entity_type,
-        type_strict=_entity_type_strict_dedup(),
-        k=k,
-    )
-    row = result.single()
-    if not row:
-        return None
-    if row["score"] < _retrieval_bm25_threshold():
-        return None
-    node = row["node"]
-    return LinkedEntity(
-        entity_id=node["entity_id"],
-        name=node.get("name") or entity.name,
-        entity_type=node.get("entity_type") or entity.entity_type,
-        score=row["score"],
-        method="bm25",
-    )
-
-
-def _link_entity_vector(tx, entity: QueryEntity) -> Optional[LinkedEntity]:
-    embedding = embed_entity_text(entity.name, "")
-    query = """
-    CALL db.index.vector.queryNodes('entity_embedding', $k, $embedding)
-    YIELD node, score
-    WHERE ($type_strict = false OR node.entity_type = $entity_type)
-    RETURN node, score
-    ORDER BY score DESC
-    LIMIT 1
-    """
-    result = tx.run(
-        query,
-        k=_entity_vector_k(),
-        embedding=embedding,
-        entity_type=entity.entity_type,
-        type_strict=_entity_type_strict_dedup(),
-    )
-    row = result.single()
-    if not row:
-        return None
-    if row["score"] < _retrieval_vector_threshold():
-        return None
-    node = row["node"]
-    return LinkedEntity(
-        entity_id=node["entity_id"],
-        name=node.get("name") or entity.name,
-        entity_type=node.get("entity_type") or entity.entity_type,
-        score=row["score"],
-        method="vector",
-    )
-
-
-def link_entities(tx, entities: List[QueryEntity]) -> List[LinkedEntity]:
-    linked: Dict[str, LinkedEntity] = {}
-    for entity in entities:
-        match = _link_entity_bm25(tx, entity)
-        if not match:
-            match = _link_entity_vector(tx, entity)
-        if not match:
-            continue
-        current = linked.get(match.entity_id)
-        if not current or match.score > current.score:
-            linked[match.entity_id] = match
-    return list(linked.values())
+    result = tx.run(query, k=k, embedding=query_embedding, min_score=min_score)
+    return [record.data() for record in result]
 
 
 def search_chunks(
@@ -152,94 +123,284 @@ def search_chunks(
     return [record.data() for record in result]
 
 
-def entities_from_chunks(tx, chunk_ids: List[str]) -> List[str]:
-    if not chunk_ids:
-        return []
-    query = """
-    MATCH (c:Chunk)
-    WHERE c.chunk_id IN $chunk_ids
-    MATCH (c)-[:MENTIONS]->(e:Entity)
-    RETURN DISTINCT e.entity_id AS entity_id
-    """
-    result = tx.run(query, chunk_ids=chunk_ids)
-    return [record["entity_id"] for record in result]
+def link_entities_bm25(tx, entities: List[QueryEntity]) -> List[str]:
+    entity_ids: List[str] = []
+    for entity in entities:
+        query = """
+        CALL db.index.fulltext.queryNodes('entity_name_aliases', $query_text)
+        YIELD node, score
+        WHERE ($type_strict = false OR node.entity_type = $entity_type)
+        RETURN node, score
+        ORDER BY score DESC
+        LIMIT $k
+        """
+        result = tx.run(
+            query,
+            query_text=_escape_lucene_query(entity.name),
+            entity_type=entity.entity_type,
+            type_strict=_entity_type_strict_dedup(),
+            k=_entity_bm25_k(),
+        )
+        incoming_toks = tokens(entity.name)
+        for row in result:
+            node = row["node"]
+            aliases = node.get("aliases") or []
+            iou_alias = 0.0
+            for alias in aliases:
+                alias_toks = tokens(alias)
+                if len(aliases) > 1 and len(alias_toks) == 1:
+                    continue
+                iou_alias = max(iou_alias, iou(incoming_toks, alias_toks))
+            if iou_alias < _entity_iou_threshold():
+                continue
+            entity_id = node.get("entity_id")
+            if entity_id:
+                entity_ids.append(entity_id)
+    return entity_ids
 
 
-def fetch_edges(
+def edges_for_entities(
     tx,
-    entity_ids: List[str],
+    entity_ids: Iterable[str],
     time_range: TimestampRange,
-    limit: int,
-) -> List[Dict[str, Optional[str]]]:
-    if not entity_ids:
+) -> List[Dict[str, object]]:
+    ids = list(entity_ids)
+    if not ids:
         return []
     query = """
     MATCH (a:Entity)-[r:RELATED_TO]->(b:Entity)
-    WHERE a.entity_id IN $entity_ids
+    WHERE (a.entity_id IN $entity_ids OR b.entity_id IN $entity_ids)
       AND ($start IS NULL OR r.end_date IS NULL OR r.end_date >= $start)
       AND ($end IS NULL OR r.start_date IS NULL OR r.start_date <= $end)
-    RETURN a.name AS source,
-           a.entity_type AS source_type,
-           b.name AS target,
-           b.entity_type AS target_type,
+    RETURN id(r) AS rel_id,
+           0.0 AS similarity,
            r.relation_text AS relation_text,
            r.start_date AS start_date,
            r.end_date AS end_date,
-           r.source_id AS source_id
-    LIMIT $limit
+           r.source_id AS source_id,
+           r.chunk_id AS chunk_id,
+           id(a) AS source_node_id,
+           id(b) AS target_node_id,
+           a.entity_id AS source_entity_id,
+           b.entity_id AS target_entity_id,
+           a.name AS source_name,
+           b.name AS target_name,
+           a.entity_type AS source_type,
+           b.entity_type AS target_type
     """
     result = tx.run(
         query,
-        entity_ids=entity_ids,
+        entity_ids=ids,
         start=time_range.start_date,
         end=time_range.end_date,
-        limit=limit,
     )
     return [record.data() for record in result]
 
 
-def format_edges_as_context(edges: List[Dict[str, Optional[str]]]) -> str:
-    if not edges:
-        return "No matching relations found."
-    lines = []
-    for edge in edges:
-        start = edge.get("start_date") or "unknown"
-        end = edge.get("end_date") or "unknown"
-        lines.append(
-            f"- {edge.get('source')} ({edge.get('source_type')}) "
-            f"-[{edge.get('relation_text')}]→ "
-            f"{edge.get('target')} ({edge.get('target_type')}) "
-            f"[{start} to {end}] (source: {edge.get('source_id')})"
-        )
+def fetch_chunks(tx, chunk_ids: List[str]) -> Dict[str, str]:
+    if not chunk_ids:
+        return {}
+    query = """
+    MATCH (c:Chunk)
+    WHERE c.chunk_id IN $chunk_ids
+    RETURN c.chunk_id AS chunk_id, c.text AS text
+    """
+    result = tx.run(query, chunk_ids=chunk_ids)
+    return {record["chunk_id"]: record["text"] for record in result}
+
+
+def run_ppr_gds(
+    tx,
+    node_ids: List[int],
+    rel_ids: List[int],
+    seed_node_ids: List[int],
+) -> Dict[str, float]:
+    if not node_ids or not rel_ids or not seed_node_ids:
+        return {}
+
+    graph_name = "ppr_tmp"
+    exists = tx.run("CALL gds.graph.exists($name) YIELD exists", name=graph_name).single()
+    if exists and exists["exists"]:
+        tx.run("CALL gds.graph.drop($name, false)", name=graph_name)
+
+    node_query = "UNWIND $node_ids AS id RETURN id"
+    rel_query = """
+    UNWIND $rel_ids AS rel_id
+    MATCH (a)-[r]->(b)
+    WHERE id(r) = rel_id
+    RETURN id(a) AS source, id(b) AS target
+    """
+
+    tx.run(
+        "CALL gds.graph.project.cypher($name, $node_query, $rel_query, {parameters: {node_ids: $node_ids, rel_ids: $rel_ids}})",
+        name=graph_name,
+        node_query=node_query,
+        rel_query=rel_query,
+        node_ids=node_ids,
+        rel_ids=rel_ids,
+    )
+
+    result = tx.run(
+        "CALL gds.pageRank.stream($name, {maxIterations: $max_iter, dampingFactor: $damping, sourceNodes: $seed_nodes}) "
+        "YIELD nodeId, score "
+        "RETURN gds.util.asNode(nodeId).entity_id AS entity_id, score",
+        name=graph_name,
+        max_iter=_ppr_max_iter(),
+        damping=_ppr_damping(),
+        seed_nodes=seed_node_ids,
+    )
+    scores = {record["entity_id"]: record["score"] for record in result}
+
+    tx.run("CALL gds.graph.drop($name)", name=graph_name)
+    return scores
+
+
+def score_edges(time_valid_relations: List[Dict[str, object]], ppr_scores: Dict[str, float]) -> List[Dict[str, object]]:
+    edges: List[Dict[str, object]] = []
+    for hit in time_valid_relations:
+        source_score = ppr_scores.get(hit["source_entity_id"], 0.0)
+        target_score = ppr_scores.get(hit["target_entity_id"], 0.0)
+        edge_score = source_score + target_score
+        if edge_score <= 0:
+            continue
+        edge = dict(hit)
+        edge["edge_score"] = edge_score
+        edges.append(edge)
+    return edges
+
+
+def rrf_fuse(
+    edge_ranked: List[Dict[str, object]],
+    chunk_ranked: List[Dict[str, object]],
+    k: int,
+) -> List[Dict[str, object]]:
+    scores: Dict[Tuple[str, str], float] = {}
+    items: Dict[Tuple[str, str], Dict[str, object]] = {}
+
+    for rank, edge in enumerate(edge_ranked, start=1):
+        key = ("edge", str(edge.get("rel_id")))
+        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+        payload = dict(edge)
+        payload["kind"] = "edge"
+        items[key] = payload
+
+    for rank, chunk in enumerate(chunk_ranked, start=1):
+        key = ("chunk", str(chunk.get("chunk_id")))
+        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+        payload = dict(chunk)
+        payload["kind"] = "chunk"
+        items[key] = payload
+
+    ranked_keys = sorted(scores.keys(), key=lambda k_: scores[k_], reverse=True)
+    return [items[k] for k in ranked_keys]
+
+
+def format_context(items: List[Dict[str, object]]) -> str:
+    if not items:
+        return "No matching context found."
+    lines: List[str] = []
+    for item in items:
+        if item.get("kind") == "chunk":
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+            lines.append(f"[chunk:{item.get('chunk_id')}] {text}")
+        else:
+            rel_text = str(item.get("relation_text") or "").strip()
+            chunk_id = item.get("chunk_id") or "unknown"
+            lines.append(
+                f"[edge:{item.get('rel_id')}] " # maybe adding the stuff below, but I think it only adds noise
+                #f"({item.get('source_name')}, {item.get('source_type')}) -> "
+                #f"({item.get('target_name')}, {item.get('target_type')}):\n"
+                f"{rel_text}\n"
+                f"source: {chunk_id}"
+            )
     return "\n".join(lines)
 
+def edge_search(session, query_embedding: List[float], entities: List[QueryEntity], time_range: TimestampRange, max_edges: int) -> List[Dict[str, object]]:
+    relation_hits = session.execute_read(
+        search_relations,
+        query_embedding,
+        _relation_vector_k(),
+        _relation_vector_threshold(),
+    )
 
-def retrieve(question: str, max_edges: int = 50) -> Dict[str, object]:
+    matched_entity_ids = session.execute_read(link_entities_bm25, entities)
+    alias_edges = session.execute_read(edges_for_entities, matched_entity_ids, time_range)
+
+    by_rel_id: Dict[int, Dict[str, object]] = {
+        hit["rel_id"]: hit for hit in relation_hits
+    }
+    for edge in alias_edges:
+        by_rel_id.setdefault(edge["rel_id"], edge)
+
+    combined_relations = list(by_rel_id.values())
+    time_valid_relations = [
+        hit
+        for hit in combined_relations
+        if _time_overlaps(hit.get("start_date"), hit.get("end_date"), time_range)
+    ]
+
+    node_ids = set()
+    rel_ids = []
+    seed_node_ids = set()
+    for hit in time_valid_relations:
+        rel_ids.append(hit["rel_id"])
+        node_ids.add(hit["source_node_id"])
+        node_ids.add(hit["target_node_id"])
+        seed_node_ids.add(hit["source_node_id"])
+        seed_node_ids.add(hit["target_node_id"])
+
+    ppr_scores = session.execute_write(
+        run_ppr_gds,
+        list(node_ids),
+        rel_ids,
+        list(seed_node_ids),
+    )
+
+    edges = score_edges(time_valid_relations, ppr_scores)
+    edges.sort(key=lambda e: e.get("edge_score", 0.0), reverse=True)
+    edges = edges[:max_edges]
+
+    return edges
+
+def vector_search(session, query_embedding: List[float], max_chunks: int) -> List[Dict[str, object]]:
+    chunk_hits = session.execute_read(
+        search_chunks,
+        query_embedding,
+        _chunk_vector_k(),
+        _chunk_vector_threshold(),
+    )
+    chunk_ids = [hit["chunk_id"] for hit in chunk_hits][:max_chunks]
+    chunk_texts = session.execute_read(fetch_chunks, chunk_ids)
+    chunks: List[Dict[str, object]] = []
+    for hit in chunk_hits[:max_chunks]:
+        chunks.append({
+            "chunk_id": hit["chunk_id"],
+            "text": chunk_texts.get(hit["chunk_id"], hit.get("text", "")),
+            "score": hit.get("score", 0.0),
+        })
+
+    return chunks
+
+def retrieve(question: str, max_edges: int = 50, max_chunks: int = 12) -> Dict[str, object]:
     entities, time_range = extract_query_entities_and_time(question)
     driver = _neo4j_driver()
     with driver.session() as session:
         query_embedding = embed_texts([question])[0]
-        chunk_hits = session.execute_read(
-            search_chunks,
-            query_embedding,
-            _chunk_vector_k(),
-            _chunk_vector_threshold(),
-        )
-        chunk_ids = [hit["chunk_id"] for hit in chunk_hits]
-        entity_ids = session.execute_read(entities_from_chunks, chunk_ids)
 
-        linked_entities: List[LinkedEntity] = []
-        if not entity_ids:
-            linked_entities = session.execute_read(link_entities, entities)
-            entity_ids = [e.entity_id for e in linked_entities]
+        edges = edge_search(session, query_embedding, entities, time_range, max_edges)
 
-        edges = session.execute_read(fetch_edges, entity_ids, time_range, max_edges)
+        chunks = vector_search(session, query_embedding, max_chunks)
+
+        fused = rrf_fuse(edges, chunks, _rrf_k())
+        context = format_context(fused)
+
     driver.close()
     return {
         "question": question,
         "time_range": time_range,
-        "chunk_hits": chunk_hits,
-        "linked_entities": linked_entities,
         "edges": edges,
-        "context": format_edges_as_context(edges),
+        "chunks": chunks,
+        "context": context,
     }
