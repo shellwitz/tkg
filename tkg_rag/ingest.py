@@ -1,6 +1,10 @@
+import asyncio
 import json
 import os
+import queue
+import random
 import re
+import threading
 import uuid
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -8,7 +12,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from neo4j import GraphDatabase
 
 from . import prompts
-from .llm_client import openai_client
+from .llm_client import async_openai_client, openai_client
 from .settings import EMBEDDING_DIM, EMBEDDING_MODEL, ENTITY_TYPES, LLM_MODEL
 from .text_utils import iou, tokens
 
@@ -79,13 +83,16 @@ def _build_extraction_prompts() -> Tuple[str, str, Dict[str, str]]:
     }
 
 
-def extract_entities_and_relations(text: str) -> Tuple[List[ExtractedEntity], List[ExtractedRelation]]:
+
+async def _async_extract_entities_and_relations(
+    text: str,
+) -> Tuple[List[ExtractedEntity], List[ExtractedRelation]]:
     system_prompt, user_prompt_template, delimiters = _build_extraction_prompts()
-    client = openai_client()
+    client = async_openai_client()
     if not LLM_MODEL:
         raise RuntimeError("LLM_MODEL is not set.")
     user_prompt = user_prompt_template.format(entity_types=", ".join(ENTITY_TYPES), input_text=text)
-    response = client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=LLM_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -95,6 +102,92 @@ def extract_entities_and_relations(text: str) -> Tuple[List[ExtractedEntity], Li
     )
     raw = response.choices[0].message.content or ""
     return parse_extraction_output(raw, delimiters["tuple_delimiter"], delimiters["record_delimiter"])
+
+
+def iter_extractions_concurrent(
+    chunks: List[str],
+    max_workers: int,
+    timeout_s: float,
+    max_pending: int,
+    max_retries: int,
+    retry_base_s: float,
+    retry_max_s: float,
+) -> Iterable[Tuple[int, List[ExtractedEntity], List[ExtractedRelation]]]:
+    if not chunks:
+        return []
+    max_workers = max(1, max_workers)
+    max_pending = max(1, max_pending)
+    max_retries = max(0, max_retries)
+    result_queue: "queue.Queue[Optional[Tuple[int, List[ExtractedEntity], List[ExtractedRelation], Optional[Exception]]]]" = queue.Queue()
+
+    def _emit_error(exc: Exception) -> None:
+        result_queue.put((-1, [], [], exc))
+
+    def producer() -> None:
+        async def run_all() -> None:
+            sem = asyncio.Semaphore(max_workers)
+            work_queue: "asyncio.Queue[Optional[Tuple[int, str]]]" = asyncio.Queue(maxsize=max_pending)
+
+            async def worker() -> None:
+                while True:
+                    item = await work_queue.get()
+                    if item is None:
+                        work_queue.task_done()
+                        break
+                    idx, chunk = item
+                    attempt = 0
+                    while True:
+                        try:
+                            async with sem:
+                                entities, relations = await asyncio.wait_for(
+                                    _async_extract_entities_and_relations(chunk),
+                                    timeout=timeout_s,
+                                )
+                            result_queue.put((idx, entities, relations, None))
+                            break
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            attempt += 1
+                            if attempt > max_retries:
+                                result_queue.put((idx, [], [], exc))
+                                break
+                            backoff = min(retry_max_s, retry_base_s * (2 ** (attempt - 1)))
+                            jitter = backoff * random.uniform(0.5, 1.5)
+                            await asyncio.sleep(jitter)
+                    work_queue.task_done()
+
+            workers = [asyncio.create_task(worker()) for _ in range(max_workers)]
+
+            for idx, chunk in enumerate(chunks):
+                await work_queue.put((idx, chunk))
+
+            await work_queue.join()
+            for _ in workers:
+                await work_queue.put(None)
+            await asyncio.gather(*workers)
+
+        try:
+            asyncio.run(run_all())
+        except Exception as exc:
+            _emit_error(exc)
+
+    producer_thread = threading.Thread(target=producer, daemon=True)
+    producer_thread.start()
+
+    yielded = 0
+    total = len(chunks)
+    while yielded < total:
+        item = result_queue.get()
+        if item is None:
+            continue
+        idx, entities, relations, err = item
+        if err is not None:
+            raise RuntimeError(
+                f"LLM extraction failed for chunk {idx + 1}: {err}"
+            ) from err
+        yielded += 1
+        yield idx, entities, relations
 
 
 def parse_extraction_output(
@@ -349,19 +442,42 @@ def ingest_text(text: str, source_id: Optional[str] = None) -> Dict[str, int]:
 
     embeddings = embed_texts(chunks)
 
+    llm_concurrency = int(os.getenv("INGEST_LLM_CONCURRENCY", "8"))
+    llm_timeout_s = float(os.getenv("INGEST_LLM_TIMEOUT_S", "180"))
+    llm_max_pending = int(os.getenv("INGEST_LLM_MAX_PENDING", "32"))
+    llm_max_retries = int(os.getenv("INGEST_LLM_MAX_RETRIES", "2"))
+    llm_retry_base_s = float(os.getenv("INGEST_LLM_RETRY_BASE_S", "0.5"))
+    llm_retry_max_s = float(os.getenv("INGEST_LLM_RETRY_MAX_S", "10"))
+    print(
+        "extracting entities/relations with "
+        f"{llm_concurrency} workers (async), timeout={llm_timeout_s}s, "
+        f"max_pending={llm_max_pending}, retries={llm_max_retries}"
+    )
+
     driver = _neo4j_driver()
     totals = {"chunks": 0, "entities": 0, "relations": 0}
 
-    i = 0
-
     with driver.session() as session:
-        for chunk, embedding in zip(chunks, embeddings):
-            i += 1
-            extracted_entities, extracted_relations = extract_entities_and_relations(chunk)
+        processed = 0
+        for idx, extracted_entities, extracted_relations in iter_extractions_concurrent(
+            chunks,
+            llm_concurrency,
+            llm_timeout_s,
+            llm_max_pending,
+            llm_max_retries,
+            llm_retry_base_s,
+            llm_retry_max_s,
+        ):
+            processed += 1
+            chunk = chunks[idx]
+            embedding = embeddings[idx]
 
-            if i % 5 == 0:
-                print(f"made {i} llm calls")
-                print(f"ingesting chunk {i}/{len(chunks)}: {len(extracted_entities)} entities, {len(extracted_relations)} relations")
+            if processed % 5 == 0:
+                print(f"made {processed} llm calls")
+                print(
+                    f"ingesting chunk {processed}/{len(chunks)}: "
+                    f"{len(extracted_entities)} entities, {len(extracted_relations)} relations"
+                )
 
             timestamp_ranges = {
                 e.name: parse_timestamp_range(e.name)
