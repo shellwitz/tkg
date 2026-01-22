@@ -15,6 +15,8 @@ echo "Waiting for Neo4j to be ready on internal port 7687..."
 NEO4J_AUTH_PAIR="${NEO4J_AUTH:-neo4j/passworty}"
 NEO4J_AUTH_USER="${TKG_NEO4J_USER:-${NEO4J_AUTH_PAIR%%/*}}"
 NEO4J_AUTH_PASS="${TKG_NEO4J_PASSWORD:-${NEO4J_AUTH_PAIR#*/}}"
+TKG_READONLY_USER="${TKG_READONLY_USER:-tkg_reader}"
+TKG_READONLY_PASSWORD="${TKG_READONLY_PASSWORD:-tkg_reader_pass}"
 
 until cypher-shell -a "bolt://localhost:7687" \
   -u "${NEO4J_AUTH_USER}" \
@@ -59,5 +61,13 @@ cypher-shell -a "bolt://localhost:7687" \
   -p "${NEO4J_AUTH_PASS}" \
   -f "$TEMP_SCHEMA"
 echo "Schema applied."
+
+echo "Ensuring read-only user ${TKG_READONLY_USER} exists..."
+cypher-shell -a "bolt://localhost:7687" \
+  -u "${NEO4J_AUTH_USER}" \
+  -p "${NEO4J_AUTH_PASS}" \
+  -d "system" \
+  "CREATE USER \`${TKG_READONLY_USER}\` IF NOT EXISTS SET PASSWORD '${TKG_READONLY_PASSWORD}' CHANGE NOT REQUIRED;"
+echo "Read-only user ensured (role grant skipped due to unsupported command in community version :( so the created user has all permissions)."
 
 wait "$NEO4J_PID"

@@ -389,6 +389,7 @@ def retrieve(question: str, max_edges: int = 50, max_chunks: int = 12) -> Dict[s
     with driver.session() as session:
         query_embedding = embed_texts([question])[0]
 
+        #todo maybe run both edge_search and vector_search async Promise.all style but probly not worth it
         edges = edge_search(session, query_embedding, entities, time_range, max_edges)
 
         chunks = vector_search(session, query_embedding, max_chunks)
