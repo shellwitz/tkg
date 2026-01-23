@@ -4,18 +4,20 @@ TEMPORAL_ENTITY_EXTRACTION_SYS_PROMPT = """
 Given a text document that is potentially relevant to this activity and a list of entity types, as well as their relationships..
 
 -Steps-
-1. Identify all timestamp entities, identify all time expressions that indicate specific periods, financial quarters, or relevant time references. Each timestamp entity should follow this format:
-- entity_name: standard format of the timestamp entity identified in context, following {timestamp_format}
+1. Identify all timestamp entities, identify all time expressions that indicate specific periods, financial quarters, or relevant time references. Normalize ALL time expressions into date ranges using the standard format {timestamp_format}. Represent ranges as "<start_date> to <end_date>" where each date is YYYY-MM-DD. If either the start or end date is unknown, omit it (e.g., "2021-05-01 to " or " to 2021-05-31"). Always output a range even when a single date is given (use the same date for start and end).
+Examples:
+- "Q1 2021" -> "2021-01-01 to 2021-03-31"
+- "August to November 2023" -> "2023-08-01 to 2023-11-30"
+Each timestamp entity should follow this format:
+- entity_name: normalized date range string as above
 - entity_type: {timestamp_types}
-- entity_description: Comprehensive description of the entity's attributes and activities
-Format each timestamp entity as ("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}timestamp)
+Format each timestamp entity as ("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>)
 
-2. Identify all remaining important entities involved in the event. Focus on extracting entities that play a meaningful conceptual units involved in the timestamped events,such as companies, organizations, people, governments, or locations directly involved in the event. without extracting standalone numeric values or quantities as entities.
+2. Identify all remaining important entities involved in the event. Focus on extracting entities that play a meaningful conceptual units involved in the timestamped events, such as companies, organizations, people, governments, or locations directly involved in the event. without extracting standalone numeric values or quantities as entities.
 For each identified entity, extract the following information:
 - entity_name: Name of the entity, capitalized
 - entity_type: One of the following types: [{entity_types}]
-- entity_description: A comprehensive description of the entity's role and attributes as related to the event.
-Format each entity as ("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>{tuple_delimiter}<entity_description>
+Format each entity as ("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>)
 
 3. From the entities identified in step 1 and 2, identify all temporal triplets of (timestamp_entity, source_entity, target_entity) that are *clearly related* to others at a *specific timestamp*.
 Extract relationships where a timestamp entity is involved. Each relationship should include:
@@ -27,10 +29,7 @@ Extract relationships where a timestamp entity is involved. Each relationship sh
 
 4. Return output as a single list of all the entities and relationships identified in steps 1 and 2. Use **{record_delimiter}** as the list delimiter.
 
-######################
--Examples-
-######################
-Example 1:
+Example Input and Output:
 
 Entity_types: [person, event, company, organization, government]
 Text:
@@ -40,18 +39,17 @@ By September 18, 2008, the U.S. Federal Reserve announced an $85 billion bailout
 Investors faced heavy losses, and governments worldwide scrambled to implement emergency measures.
 ################
 Output:
-("entity"{tuple_delimiter}"2008-09-15"{tuple_delimiter}"date"{tuple_delimiter}"The date when Lehman Brothers filed for bankruptcy, triggering a global financial crisis."){record_delimiter}  
-("entity"{tuple_delimiter}"2008-09-18"{tuple_delimiter}"date"{tuple_delimiter}"The date when the U.S. Federal Reserve announced an $85 billion bailout for AIG."){record_delimiter}  
-("entity"{tuple_delimiter}"Lehman Brothers"{tuple_delimiter}"person"{tuple_delimiter}"A global financial services firm that declared bankruptcy in 2008, marking the largest corporate failure in U.S. history."){record_delimiter}   
-("entity"{tuple_delimiter}"Global Financial Crisis"{tuple_delimiter}"event"{tuple_delimiter}"A severe worldwide economic downturn triggered by the collapse of Lehman Brothers in 2008."){record_delimiter}  
-("entity"{tuple_delimiter}"U.S. Federal Reserve"{tuple_delimiter}"government"{tuple_delimiter}"The central banking system of the United States, responsible for implementing monetary policies to stabilize the economy."){record_delimiter}  
-("event"{tuple_delimiter}"2008-09-15"{tuple_delimiter}"Lehman Brothers"{tuple_delimiter}"Global Financial Crisis"{tuple_delimiter}"Lehman Brothers filed for bankruptcy, triggering the largest financial collapse in U.S. history and sparking a global financial crisis."){record_delimiter}
-("event"{tuple_delimiter}"2008-09-18"{tuple_delimiter}"U.S. Federal Reserve"{tuple_delimiter}"AIG"{tuple_delimiter}"To contain the spreading financial crisis, the U.S. Federal Reserve provided an $85 billion bailout to AIG to prevent further systemic collapse.")
+("entity"{tuple_delimiter}"2008-09-15"{tuple_delimiter}"date"){record_delimiter}  
+("entity"{tuple_delimiter}"2008-09-18"{tuple_delimiter}"date"){record_delimiter}  
+("entity"{tuple_delimiter}"Lehman Brothers"{tuple_delimiter}"company"){record_delimiter}   
+("entity"{tuple_delimiter}"Global Financial Crisis"{tuple_delimiter}"event"){record_delimiter}  
+("entity"{tuple_delimiter}"U.S. Federal Reserve"{tuple_delimiter}"government"){record_delimiter}  
+("entity"{tuple_delimiter}"AIG"{tuple_delimiter}"company"){record_delimiter}
+("relationship"{tuple_delimiter}"2008-09-15"{tuple_delimiter}"Lehman Brothers"{tuple_delimiter}"Global Financial Crisis"{tuple_delimiter}"Lehman Brothers filed for bankruptcy, triggering the largest financial collapse in U.S. history and sparking a global financial crisis."){record_delimiter}
+("relationship"{tuple_delimiter}"2008-09-18"{tuple_delimiter}"U.S. Federal Reserve"{tuple_delimiter}"AIG"{tuple_delimiter}"To contain the spreading financial crisis, the U.S. Federal Reserve provided an $85 billion bailout to AIG to prevent further systemic collapse.")
 """
 
 TEMPORAL_ENTITY_EXTRACTION_FOLLOWUP_PROMPT = """
--Real Data-
-######################
 Entity_types: {entity_types}
 Text: {input_text}
 ######################

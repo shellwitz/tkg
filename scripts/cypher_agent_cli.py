@@ -1,5 +1,6 @@
 #!.venv/bin/python3
 import argparse
+import logging
 import os
 import sys
 from pathlib import Path
@@ -11,10 +12,14 @@ load_dotenv()
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from tkg_rag.logging_utils import setup_logging
 from tkg_rag.cypher_agent import run_cypher_agent
+
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    setup_logging()
     parser = argparse.ArgumentParser(description="Run the Cypher agent against Neo4j.")
     parser.add_argument(
         "-q",
@@ -74,7 +79,7 @@ def main() -> None:
         max_steps=args.max_steps,
         log_path=str(log_path),
     )
-    print(result["answer"])
+    logger.info("%s", result["answer"])
 
 
 if __name__ == "__main__":

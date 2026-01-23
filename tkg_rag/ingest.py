@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import queue
 import random
@@ -13,15 +14,17 @@ from neo4j import GraphDatabase
 
 from . import prompts
 from .llm_client import async_openai_client, openai_client
+from .logging_utils import setup_logging
 from .settings import EMBEDDING_DIM, EMBEDDING_MODEL, ENTITY_TYPES, LLM_MODEL
 from .text_utils import iou, tokens
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class ExtractedEntity:
     name: str
     entity_type: str
-    description: str
 
 
 @dataclass
@@ -42,28 +45,72 @@ DEFAULT_TIME_TYPES = ["date", "date_range", "quarter", "year"]
 DEFAULT_TIMESTAMP_FORMAT = "ISO-8601 or ISO-like (YYYY, YYYY-MM-DD, YYYY-Qn)"
 
 
+def _simple_sentence_split(text: str) -> List[str]:
+    # Split on common sentence endings simpler than NLTK
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    return [s.strip() for s in sentences if s.strip()]
+
+
+def _chunk_units(text: str) -> List[str]:
+    paragraphs = re.split(r"\n\s*--\s*\n|\n\s*\n", text)
+    units: List[str] = []
+    for idx, paragraph in enumerate(paragraphs):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        sentences = _simple_sentence_split(paragraph)
+        if not sentences:
+            sentences = [paragraph]
+        for s_idx, sentence in enumerate(sentences):
+            if not units:
+                prefix = ""
+            elif s_idx == 0:
+                prefix = "\n\n"
+            else:
+                prefix = " "
+            units.append(f"{prefix}{sentence}")
+    return units
+
+
 def chunk_text(text: str, max_chars: int = 1600, overlap: int = 200) -> List[str]:
     if not text:
         return []
     text = text.strip()
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = min(len(text), start + max_chars)
-        if end < len(text):
-            split_at = text.rfind("\n", start, end)
-            if split_at == -1:
-                split_at = text.rfind(". ", start, end)
-            if split_at > start + 200:
-                end = split_at + 1
-        chunks.append(text[start:end].strip())
-        if end == len(text):
+    units = _chunk_units(text)
+    if not units:
+        return []
+    chunks: List[str] = []
+    start_idx = 0
+    while start_idx < len(units):
+        curr: List[str] = []
+        curr_len = 0
+        idx = start_idx
+        while idx < len(units):
+            piece = units[idx]
+            if not curr:
+                piece = piece.lstrip()
+            if curr_len + len(piece) > max_chars and curr:
+                break
+            curr.append(piece)
+            curr_len += len(piece)
+            idx += 1
+        chunk = "".join(curr).strip()
+        if chunk:
+            chunks.append(chunk)
+        if idx >= len(units):
             break
-        next_start = max(0, end - overlap)
-        # Guard against no forward progress (can otherwise loop forever).
-        if next_start <= start:
-            break
-        start = next_start
+        if overlap <= 0:
+            next_start_idx = idx
+        else:
+            back_chars = 0
+            back_idx = idx - 1
+            while back_idx >= start_idx and back_chars < overlap:
+                back_chars += len(units[back_idx])
+                back_idx -= 1
+            next_start_idx = max(0, back_idx + 1)
+        if next_start_idx <= start_idx:
+            next_start_idx = start_idx + 1
+        start_idx = next_start_idx
     return [c for c in chunks if c]
 
 
@@ -149,7 +196,18 @@ def iter_extractions_concurrent(
                             raise
                         except Exception as exc:
                             attempt += 1
+                            # logger.warning(
+                            #     "Error extracting entities and relations (attempt %s/%s): %s",
+                            #     attempt,
+                            #     max_retries + 1,
+                            #     exc,
+                            # )
                             if attempt > max_retries:
+                                logger.warning(
+                                "Error extracting entities and relations skipping this chunk (attempt %s): %s",
+                                attempt,
+                                exc,
+                            )
                                 result_queue.put((idx, [], [], exc))
                                 break
                             backoff = min(retry_max_s, retry_base_s * (2 ** (attempt - 1)))
@@ -204,10 +262,8 @@ def parse_extraction_output(
         if not parts:
             continue
         if parts[0] == "entity":
-            if len(parts) >= 4:
-                entities.append(ExtractedEntity(parts[1], parts[2], parts[3]))
-            elif len(parts) == 3:
-                entities.append(ExtractedEntity(parts[1], parts[2], ""))
+            if len(parts) >= 3:
+                entities.append(ExtractedEntity(parts[1], parts[2]))
         elif parts[0] in {"relationship", "event"}:
             if len(parts) >= 5:
                 relations.append(ExtractedRelation(parts[1], parts[2], parts[3], parts[4]))
@@ -235,10 +291,6 @@ def _neo4j_driver():
     user = os.getenv("TKG_NEO4J_USER", "neo4j")
     password = os.getenv("TKG_NEO4J_PASSWORD", "passworty")
     return GraphDatabase.driver(uri, auth=(user, password))
-
-
-def _normalize_name(name: str) -> str:
-    return re.sub(r"\s+", " ", name.strip()).lower()
 
 def _is_time_entity(entity_type: str) -> bool:
     return entity_type == "timestamp" or entity_type in DEFAULT_TIME_TYPES
@@ -317,7 +369,7 @@ def upsert_entity(tx, entity) -> str:
                 aliases=sorted(aliases),
             )
 
-        print(f"Merged by IoU={best_iou:.2f}: '{entity.name}' -> '{best.get('name')}'")
+        #print(f"Merged by IoU={best_iou:.2f}: '{entity.name}' -> '{best.get('name')}'")
         return entity_id
 
     # 3) create new if no good lexical overlap
@@ -328,16 +380,12 @@ def upsert_entity(tx, entity) -> str:
           entity_id: $entity_id,
           name: $name,
           entity_type: $entity_type,
-          description: $description,
-          normalized_name: $normalized_name,
           aliases: $aliases
         })
         """,
         entity_id=entity_id,
         name=entity.name,
         entity_type=entity.entity_type,
-        description=entity.description,
-        normalized_name=_normalize_name(entity.name),
         aliases=[entity.name],
     )
     return entity_id
@@ -412,6 +460,16 @@ def create_relationship(
     )
 
 
+def try_embed_texts(texts: List[str], model: Optional[str] = None, expected_dim: Optional[int] = None, max_retries: int = 3) -> Optional[List[List[float]]]:
+    for attempt in range(max_retries):
+        try:
+            return embed_texts(texts, model=model, expected_dim=expected_dim)
+            time.sleep(2**attempt)  # exponential backoff
+        except:
+            continue
+    return None
+
+
 def embed_texts(
     texts: List[str], model: Optional[str] = None, expected_dim: Optional[int] = None
 ) -> List[List[float]]:
@@ -434,31 +492,36 @@ def embed_texts(
 
 def ingest_text(text: str, source_id: Optional[str] = None) -> Dict[str, int]:
     chunks = chunk_text(text)
-
-    print("got chunks:", len(chunks))
+    logger.info("got chunks: %s", len(chunks or []))
 
     if not chunks:
         return {"chunks": 0, "entities": 0, "relations": 0}
+    max_embedding_retries = 3
+    embeddings = try_embed_texts(chunks, max_retries=max_embedding_retries)
 
-    embeddings = embed_texts(chunks)
-
+    if embeddings is None:
+        logger.warning("Failed to embed texts after %s attempts.", max_embedding_retries)
+        return {"chunks": 0, "entities": 0, "relations": 0}
+    
+    #openais client also supports max retries and timeout but probly doesnt support backoff and fails at dns sometimes -> own logic
     llm_concurrency = int(os.getenv("INGEST_LLM_CONCURRENCY", "8"))
     llm_timeout_s = float(os.getenv("INGEST_LLM_TIMEOUT_S", "180"))
     llm_max_pending = int(os.getenv("INGEST_LLM_MAX_PENDING", "32"))
     llm_max_retries = int(os.getenv("INGEST_LLM_MAX_RETRIES", "2"))
     llm_retry_base_s = float(os.getenv("INGEST_LLM_RETRY_BASE_S", "0.5"))
     llm_retry_max_s = float(os.getenv("INGEST_LLM_RETRY_MAX_S", "10"))
-    print(
-        "extracting entities/relations with "
-        f"{llm_concurrency} workers (async), timeout={llm_timeout_s}s, "
-        f"max_pending={llm_max_pending}, retries={llm_max_retries}"
+    logger.info(
+        "extracting entities/relations with %s workers (async), timeout=%ss, max_pending=%s, retries=%s",
+        llm_concurrency,
+        llm_timeout_s,
+        llm_max_pending,
+        llm_max_retries,
     )
 
     driver = _neo4j_driver()
     totals = {"chunks": 0, "entities": 0, "relations": 0}
 
     with driver.session() as session:
-        processed = 0
         for idx, extracted_entities, extracted_relations in iter_extractions_concurrent(
             chunks,
             llm_concurrency,
@@ -468,16 +531,9 @@ def ingest_text(text: str, source_id: Optional[str] = None) -> Dict[str, int]:
             llm_retry_base_s,
             llm_retry_max_s,
         ):
-            processed += 1
             chunk = chunks[idx]
             embedding = embeddings[idx]
-
-            if processed % 5 == 0:
-                print(f"made {processed} llm calls")
-                print(
-                    f"ingesting chunk {processed}/{len(chunks)}: "
-                    f"{len(extracted_entities)} entities, {len(extracted_relations)} relations"
-                )
+        
 
             timestamp_ranges = {
                 e.name: parse_timestamp_range(e.name)
@@ -521,7 +577,7 @@ def ingest_text(text: str, source_id: Optional[str] = None) -> Dict[str, int]:
                     )
                 return chunk_id, len(entity_ids), len(extracted_relations)
 
-            chunk_id, entity_count, rel_count = session.execute_write(ingest_chunk)
+            _, entity_count, rel_count = session.execute_write(ingest_chunk)
             totals["chunks"] += 1
             totals["entities"] += entity_count
             totals["relations"] += rel_count

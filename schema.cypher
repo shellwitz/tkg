@@ -22,7 +22,7 @@ DELETE e;
 // Full-text indexes
 CREATE FULLTEXT INDEX entity_name_aliases IF NOT EXISTS
 FOR (e:Entity)
-ON EACH [e.name, e.aliases, e.normalized_name]; //maybe too agressive, e.description
+ON EACH [e.name, e.aliases];
 
 CREATE FULLTEXT INDEX chunk_text IF NOT EXISTS
 FOR (c:Chunk)

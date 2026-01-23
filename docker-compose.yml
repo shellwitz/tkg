@@ -18,7 +18,7 @@ services:
       - NEO4J_dbms_security_procedures_allowlist=gds.*
       - EMBEDDING_DIM=${EMBEDDING_DIM:-3072}
     volumes:
-      - tkg:/data
+      - tkg_v2:/data
 
 volumes:
-  tkg:
+  tkg_v2: #og is tkg
