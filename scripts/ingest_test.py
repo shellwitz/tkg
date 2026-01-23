@@ -24,29 +24,29 @@ def insert_simple(base_data):
 
     logger.info("Ingesting text data")
     start_ts = time.time()
-    output = ingest_text(first_doc, "CROCS_2020_q1")
+    output = ingest_text(first_doc, source_uri="CROCS/2020/Q1", source_last_modified=time.time())
     end_ts = time.time()
     logger.info("Ingestion time: %.2f seconds", end_ts - start_ts)
     logger.info("%s", output)
 
 
-QUESTION_INDICES = [4, 5, 6,7, 8]
+QUESTION_INDICES = range(10) #[4, 5, 6,7, 8]
 
 def insert_all(base_data):
     all_start_ts = time.time()
     for i, line in enumerate(base_data):
         info = json.loads(line)
         text = info["raw_content"]
-        doc_id = info["stock_code"] + "_" + info["year"] + "_" + info["quarter"]
+        doc_uri = info["stock_code"] + "/" + info["year"] + "/" + info["quarter"]
 
         logger.info(
             "Ingesting text data for doc_id %s (%s/%s)",
-            doc_id,
+            doc_uri,
             i + 1,
             len(base_data),
         )
         i_start_ts = time.time()
-        output = ingest_text(text, doc_id)
+        output = ingest_text(text, source_uri=doc_uri, source_last_modified=time.time())
         i_end_ts = time.time()
         logger.info("Ingestion time: %.2f seconds", i_end_ts - i_start_ts)
         logger.info("%s", output)
@@ -76,22 +76,27 @@ def insert_wrt_q_indices(base_data):
         if not evidence_list: #unanswerable question
             continue
         stock_codes = {e["stock_code"] for e in evidence_list} #no clue if there actually exist more than one stock codes for evidence
+
         for stock_code in stock_codes:
             to_insert.extend(base_data_stock_code_map[stock_code])
     
     all_start_ts = time.time()
+
+    stock_codes_to_insert = {entry["stock_code"] for entry in to_insert}
+    logger.info("Ingesting documents for stock codes: %s", ", ".join(stock_codes_to_insert))
+
     for i, entry in enumerate(to_insert):
         text = entry["raw_content"]
-        doc_id = entry["stock_code"] + "_" + entry["year"] + "_" + entry["quarter"]
+        doc_uri = entry["stock_code"] + "/" + entry["year"] + "/" + entry["quarter"]
 
         logger.info(
             "Ingesting text data for doc_id %s (%s/%s)",
-            doc_id,
+            doc_uri,
             i + 1,
             len(to_insert),
         )
         i_start_ts = time.time()
-        output = ingest_text(text, doc_id)
+        output = ingest_text(text, source_uri=doc_uri, source_last_modified=time.time())
         i_end_ts = time.time()
         logger.info("Ingestion time: %.2f seconds", i_end_ts - i_start_ts)
         logger.info("%s", output)

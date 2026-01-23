@@ -15,7 +15,13 @@ from neo4j import GraphDatabase
 from . import prompts
 from .llm_client import async_openai_client, openai_client
 from .logging_utils import setup_logging
-from .settings import EMBEDDING_DIM, EMBEDDING_MODEL, ENTITY_TYPES, LLM_MODEL
+from .settings import (
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL,
+    ENTITY_TYPES,
+    LLM_MODEL,
+    RELATION_DEDUP_SIM_THRESHOLD,
+)
 from .text_utils import iou, tokens
 
 logger = logging.getLogger(__name__)
@@ -404,8 +410,7 @@ def create_chunk(tx, text: str, embedding: List[float], source_id: Optional[str]
     if source_id:
         tx.run(
             """
-            MERGE (s:Source {source_id: $source_id})
-            WITH s
+            MATCH (s:Source {source_id: $source_id})
             MATCH (c:Chunk {chunk_id: $chunk_id})
             MERGE (c)-[:FROM_SOURCE]->(s)
             """,
@@ -413,6 +418,22 @@ def create_chunk(tx, text: str, embedding: List[float], source_id: Optional[str]
             chunk_id=chunk_id,
         )
     return chunk_id
+
+
+def create_source(tx, source_id: str, uri: Optional[str] = None, last_modified: Optional[str] = None) -> None:
+    tx.run(
+        """
+        MERGE (s:Source {source_id: $source_id})
+        SET s.uri = coalesce($uri, s.uri),
+            s.last_modified = CASE
+                WHEN $last_modified IS NULL THEN s.last_modified
+                ELSE datetime($last_modified)
+            END
+        """,
+        source_id=source_id,
+        uri=uri,
+        last_modified=last_modified,
+    )
 
 
 def link_chunk_mentions(tx, chunk_id: str, entity_ids: Iterable[str]) -> None:
@@ -430,7 +451,6 @@ def link_chunk_mentions(tx, chunk_id: str, entity_ids: Iterable[str]) -> None:
 
 def create_relationship(
     tx,
-    source_id: str,
     source_entity_id: str,
     target_entity_id: str,
     relation_text: str,
@@ -439,19 +459,80 @@ def create_relationship(
     start_date: Optional[str],
     end_date: Optional[str],
 ) -> None:
+    existing = tx.run(
+        """
+        MATCH (s:Entity {entity_id: $source_entity_id})
+        MATCH (t:Entity {entity_id: $target_entity_id})
+        MATCH (s)-[r:RELATED_TO]->(t)
+        WHERE ((r.start_date IS NULL AND $start_date IS NULL) OR r.start_date = date($start_date))
+          AND ((r.end_date IS NULL AND $end_date IS NULL) OR r.end_date = date($end_date))
+        RETURN id(r) AS rel_id,
+               gds.similarity.cosine(r.relation_embedding, $relation_embedding) AS similarity
+        """,
+        source_entity_id=source_entity_id,
+        target_entity_id=target_entity_id,
+        start_date=start_date,
+        end_date=end_date,
+        relation_embedding=relation_embedding,
+    )
+    best_rel_id = None
+    best_sim = -1.0
+    for row in existing:
+        sim = row.get("similarity")
+        if sim is None:
+            continue
+        if sim > best_sim:
+            best_sim = sim
+            best_rel_id = row.get("rel_id")
+
+    if best_rel_id is not None and best_sim >= RELATION_DEDUP_SIM_THRESHOLD:
+        logger.info(
+            "Merged relation edge rel_id=%s similarity=%.4f chunk_id=%s",
+            best_rel_id,
+            best_sim,
+            chunk_id,
+        )
+        tx.run(
+            """
+            MATCH ()-[r:RELATED_TO]->()
+            WHERE id(r) = $rel_id
+            WITH r, $relation_embedding AS new_emb, $chunk_id AS cid, coalesce(r.chunk_ids, []) AS existing
+            WITH r, new_emb, cid, existing,
+                 CASE WHEN cid IN existing THEN existing ELSE existing + [cid] END AS updated,
+                 CASE WHEN cid IN existing THEN 0 ELSE 1 END AS added
+            SET r.chunk_ids = updated
+            WITH r, new_emb, added, size(existing) AS n
+            WHERE added = 1
+            SET r.relation_embedding = CASE
+                WHEN r.relation_embedding IS NULL THEN new_emb
+                ELSE [i IN range(0, size(new_emb) - 1) |
+                    (r.relation_embedding[i] * n + new_emb[i]) / (n + 1)
+                ]
+            END
+            """,
+            rel_id=best_rel_id,
+            chunk_id=chunk_id,
+            relation_embedding=relation_embedding,
+        )
+        return
+
+    relation_id = str(uuid.uuid4())
     tx.run(
         """
         MATCH (s:Entity {entity_id: $source_entity_id})
         MATCH (t:Entity {entity_id: $target_entity_id})
-        MERGE (s)-[r:RELATED_TO {source_id: $source_id, relation_text: $relation_text}]->(t)
-        SET r.start_date = $start_date,
-            r.end_date = $end_date,
-            r.chunk_id = $chunk_id,
-            r.relation_embedding = $relation_embedding
+        CREATE (s)-[r:RELATED_TO {
+            relation_id: $relation_id,
+            relation_text: $relation_text,
+            start_date: date($start_date),
+            end_date: date($end_date),
+            chunk_ids: [$chunk_id],
+            relation_embedding: $relation_embedding
+        }]->(t)
         """,
         source_entity_id=source_entity_id,
         target_entity_id=target_entity_id,
-        source_id=source_id,
+        relation_id=relation_id,
         relation_text=relation_text,
         relation_embedding=relation_embedding,
         chunk_id=chunk_id,
@@ -490,7 +571,12 @@ def embed_texts(
     return vectors
 
 
-def ingest_text(text: str, source_id: Optional[str] = None) -> Dict[str, int]:
+def ingest_text(
+    text: str,
+    source_id: Optional[str] = None,
+    source_uri: Optional[str] = None,
+    source_last_modified: Optional[str] = None,
+) -> Dict[str, int]:
     chunks = chunk_text(text)
     logger.info("got chunks: %s", len(chunks or []))
 
@@ -522,6 +608,16 @@ def ingest_text(text: str, source_id: Optional[str] = None) -> Dict[str, int]:
     totals = {"chunks": 0, "entities": 0, "relations": 0}
 
     with driver.session() as session:
+        if not source_id:
+            source_id = str(uuid.uuid4())
+
+        session.execute_write(
+            create_source,
+            source_id,
+            source_uri,
+            source_last_modified,
+        )
+            
         for idx, extracted_entities, extracted_relations in iter_extractions_concurrent(
             chunks,
             llm_concurrency,
@@ -566,7 +662,6 @@ def ingest_text(text: str, source_id: Optional[str] = None) -> Dict[str, int]:
                     tr = timestamp_ranges.get(rel.timestamp_entity, TimestampRange(None, None))
                     create_relationship(
                         tx,
-                        source_id or chunk_id,
                         src_id,
                         tgt_id,
                         rel.description,

@@ -88,10 +88,9 @@ def search_relations(
     RETURN id(relationship) AS rel_id,
            score AS similarity,
            relationship.relation_text AS relation_text,
-           relationship.start_date AS start_date,
-           relationship.end_date AS end_date,
-           relationship.source_id AS source_id,
-           relationship.chunk_id AS chunk_id,
+           toString(relationship.start_date) AS start_date,
+           toString(relationship.end_date) AS end_date,
+           relationship.chunk_ids AS chunk_ids,
            id(startNode(relationship)) AS source_node_id,
            id(endNode(relationship)) AS target_node_id,
            startNode(relationship).entity_id AS source_entity_id,
@@ -170,16 +169,15 @@ def edges_for_entities(
     query = """
     MATCH (a:Entity)-[r:RELATED_TO]->(b:Entity)
     WHERE (a.entity_id IN $entity_ids OR b.entity_id IN $entity_ids)
-      AND ($start IS NULL OR r.end_date IS NULL OR r.end_date >= $start)
-      AND ($end IS NULL OR r.start_date IS NULL OR r.start_date <= $end)
+      AND ($start IS NULL OR r.end_date IS NULL OR r.end_date >= date($start))
+      AND ($end IS NULL OR r.start_date IS NULL OR r.start_date <= date($end))
     RETURN id(r) AS rel_id,
            0.0 AS similarity,
            r.relation_text AS relation_text,
-           r.start_date AS start_date,
-           r.end_date AS end_date,
-           r.source_id AS source_id,
-           r.chunk_id AS chunk_id,
-           id(a) AS source_node_id,
+           toString(r.start_date) AS start_date,
+           toString(r.end_date) AS end_date,
+           r.chunk_ids AS chunk_ids,
+            id(a) AS source_node_id,
            id(b) AS target_node_id,
            a.entity_id AS source_entity_id,
            b.entity_id AS target_entity_id,
@@ -307,7 +305,8 @@ def format_context(items: List[Dict[str, object]]) -> str:
             lines.append(f"[chunk:{item.get('chunk_id')}] {text}")
         else:
             rel_text = str(item.get("relation_text") or "").strip()
-            chunk_id = item.get("chunk_id") or "unknown"
+            chunk_ids = item.get("chunk_ids") or []
+            chunk_id = chunk_ids[0] if chunk_ids else "unknown"
             lines.append(
                 f"[edge:{item.get('rel_id')}] " # maybe adding the stuff below, but I think it only adds noise
                 #f"({item.get('source_name')}, {item.get('source_type')}) -> "
