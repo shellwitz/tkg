@@ -8,6 +8,8 @@ import re
 import threading
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import calendar
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from neo4j import GraphDatabase
@@ -278,17 +280,78 @@ def parse_extraction_output(
 
 def parse_timestamp_range(name: str) -> TimestampRange:
     name = name.strip()
+    month_map = {
+        "january": 1,
+        "jan": 1,
+        "february": 2,
+        "feb": 2,
+        "march": 3,
+        "mar": 3,
+        "april": 4,
+        "apr": 4,
+        "may": 5,
+        "june": 6,
+        "jun": 6,
+        "july": 7,
+        "jul": 7,
+        "august": 8,
+        "aug": 8,
+        "september": 9,
+        "sep": 9,
+        "sept": 9,
+        "october": 10,
+        "oct": 10,
+        "november": 11,
+        "nov": 11,
+        "december": 12,
+        "dec": 12,
+    }
+
+    def _month_num(month: str) -> Optional[int]:
+        if not month:
+            return None
+        return month_map.get(month.strip().lower())
+
     if re.match(r"^\d{4}-\d{2}-\d{2}$", name):
         return TimestampRange(name, name)
     if re.match(r"^\d{4}$", name):
         return TimestampRange(f"{name}-01-01", f"{name}-12-31")
+    m_range = re.match(
+        r"^(?P<m1>[A-Za-z]+)\s*(?:-\s*|to\s+)(?P<m2>[A-Za-z]+)\s*(?P<y>\d{4})$",
+        name,
+        re.IGNORECASE,
+    )
+    if m_range:
+        m1 = _month_num(m_range.group("m1"))
+        m2 = _month_num(m_range.group("m2"))
+        y = int(m_range.group("y"))
+        if m1 and m2:
+            end_day = calendar.monthrange(y, m2)[1]
+            return TimestampRange(f"{y}-{m1:02d}-01", f"{y}-{m2:02d}-{end_day:02d}")
+    m_range = re.match(
+        r"^(?P<m1>[A-Za-z]+)\s+(?P<y1>\d{4})\s*(?:-\s*|to\s+)(?P<m2>[A-Za-z]+)\s+(?P<y2>\d{4})$",
+        name,
+        re.IGNORECASE,
+    )
+    if m_range:
+        m1 = _month_num(m_range.group("m1"))
+        m2 = _month_num(m_range.group("m2"))
+        y1 = int(m_range.group("y1"))
+        y2 = int(m_range.group("y2"))
+        if m1 and m2:
+            end_day = calendar.monthrange(y2, m2)[1]
+            return TimestampRange(f"{y1}-{m1:02d}-01", f"{y2}-{m2:02d}-{end_day:02d}")
     q_match = re.match(r"^(?:Q([1-4])\s*(\d{4})|(\d{4})-Q([1-4]))$", name)
     if q_match:
         q = int(q_match.group(1) or q_match.group(4))
         y = int(q_match.group(2) or q_match.group(3))
         start_month = 3 * (q - 1) + 1
         end_month = start_month + 2
-        return TimestampRange(f"{y}-{start_month:02d}-01", f"{y}-{end_month:02d}-31")
+        end_day = calendar.monthrange(y, end_month)[1]
+        return TimestampRange(
+            f"{y}-{start_month:02d}-01",
+            f"{y}-{end_month:02d}-{end_day:02d}",
+        )
     return TimestampRange(None, None)
 
 
@@ -421,6 +484,17 @@ def create_chunk(tx, text: str, embedding: List[float], source_id: Optional[str]
 
 
 def create_source(tx, source_id: str, uri: Optional[str] = None, last_modified: Optional[str] = None) -> None:
+    last_modified_param = last_modified
+    if isinstance(last_modified, (int, float)):
+        if last_modified > 1e12:
+            last_modified_param = {"epochMillis": int(last_modified)}
+        else:
+            last_modified_param = {"epochSeconds": int(last_modified)}
+    elif isinstance(last_modified, datetime):
+        if last_modified.tzinfo is None:
+            last_modified_param = last_modified.replace(tzinfo=timezone.utc)
+        else:
+            last_modified_param = last_modified
     tx.run(
         """
         MERGE (s:Source {source_id: $source_id})
@@ -432,7 +506,7 @@ def create_source(tx, source_id: str, uri: Optional[str] = None, last_modified: 
         """,
         source_id=source_id,
         uri=uri,
-        last_modified=last_modified,
+        last_modified=last_modified_param,
     )
 
 
@@ -466,7 +540,7 @@ def create_relationship(
         MATCH (s)-[r:RELATED_TO]->(t)
         WHERE ((r.start_date IS NULL AND $start_date IS NULL) OR r.start_date = date($start_date))
           AND ((r.end_date IS NULL AND $end_date IS NULL) OR r.end_date = date($end_date))
-        RETURN id(r) AS rel_id,
+        RETURN r.relation_id AS rel_id,
                gds.similarity.cosine(r.relation_embedding, $relation_embedding) AS similarity
         """,
         source_entity_id=source_entity_id,
@@ -495,7 +569,7 @@ def create_relationship(
         tx.run(
             """
             MATCH ()-[r:RELATED_TO]->()
-            WHERE id(r) = $rel_id
+            WHERE r.relation_id = $rel_id
             WITH r, $relation_embedding AS new_emb, $chunk_id AS cid, coalesce(r.chunk_ids, []) AS existing
             WITH r, new_emb, cid, existing,
                  CASE WHEN cid IN existing THEN existing ELSE existing + [cid] END AS updated,

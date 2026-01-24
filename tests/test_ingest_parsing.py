@@ -84,6 +84,36 @@ class TestParseTimestampRange(unittest.TestCase):
             parse_timestamp_range("  Q4   1999  "),
         )
 
+    def test_parses_month_range_same_year(self) -> None:
+        self.assertEqual(
+            TimestampRange("2023-08-01", "2023-11-30"),
+            parse_timestamp_range("August to November 2023"),
+        )
+
+    def test_parses_month_range_abbrev(self) -> None:
+        self.assertEqual(
+            TimestampRange("2023-08-01", "2023-11-30"),
+            parse_timestamp_range("Aug-Nov 2023"),
+        )
+
+    def test_parses_month_range_split_years(self) -> None:
+        self.assertEqual(
+            TimestampRange("2022-11-01", "2023-02-28"),
+            parse_timestamp_range("November 2022 to February 2023"),
+        )
+
+    def test_parses_month_range_with_years_each_side_dash(self) -> None:
+        self.assertEqual(
+            TimestampRange("2023-08-01", "2023-11-30"),
+            parse_timestamp_range("Aug 2023 - Nov 2023"),
+        )
+
+    def test_parses_month_range_with_years_each_side_to(self) -> None:
+        self.assertEqual(
+            TimestampRange("2023-08-01", "2023-11-30"),
+            parse_timestamp_range("Aug 2023 to Nov 2023"),
+        )
+
     def test_rejects_invalid_quarter(self) -> None:
         self.assertEqual(
             TimestampRange(None, None),
