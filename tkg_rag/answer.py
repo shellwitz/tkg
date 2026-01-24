@@ -19,9 +19,3 @@ def generate_answer(question: str, context: str) -> str:
         temperature=0,
     )
     return (response.choices[0].message.content or "").strip()
-
-
-def answer_with_context(payload: Dict[str, object]) -> str:
-    question = str(payload.get("question", "")).strip()
-    context = str(payload.get("context", "")).strip()
-    return generate_answer(question, context)

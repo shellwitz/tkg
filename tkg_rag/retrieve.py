@@ -389,18 +389,21 @@ def retrieve(question: str, max_edges: int = 50, max_chunks: int = 12) -> Dict[s
         query_embedding = embed_texts([question])[0]
 
         #todo maybe run both edge_search and vector_search async Promise.all style but probly not worth it
-        edges = edge_search(session, query_embedding, entities, time_range, max_edges)
+        #edges = edge_search(session, query_embedding, entities, time_range, max_edges)
 
         chunks = vector_search(session, query_embedding, max_chunks)
-
-        fused = rrf_fuse(edges, chunks, _rrf_k())
+        #fused = chunks
+        fused = rrf_fuse(
+            #edges,
+            [],
+            chunks, _rrf_k())
         context = format_context(fused)
 
     driver.close()
     return {
         "question": question,
         "time_range": time_range,
-        "edges": edges,
+        #"edges": edges,
         "chunks": chunks,
         "context": context,
     }
