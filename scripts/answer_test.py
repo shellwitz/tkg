@@ -64,7 +64,7 @@ def main() -> None:
                 question_objs.append(question_obj)
 
 
-        with open(ANSWER_PATH, "a") as f:
+        with open(ANSWER_PATH, "w") as f:
             start_ts = time.time()
             for i, question_obj in enumerate(question_objs):
                 result = retrieve(question_obj["question"])

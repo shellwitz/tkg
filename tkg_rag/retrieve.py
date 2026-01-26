@@ -293,27 +293,54 @@ def rrf_fuse(
     return [items[k] for k in ranked_keys]
 
 
-def format_context(items: List[Dict[str, object]]) -> str:
+def format_context(items: List[Dict[str, object]]) -> Tuple[str, dict]:
+    chunk_and_edge_map = {}
+    inv_chunk_map = {}
     if not items:
         return "No matching context found."
-    lines: List[str] = []
+    lines: List[str] = ["Context from a temporal knowledge graph. E stands for edge c for chunk with an id[e_id:N] or [c_id:N] \n"]
+
+    edge_count = 1
+    chunk_count = 1
+    source_count = 1
     for item in items:
-        if item.get("kind") == "chunk":
-            text = str(item.get("text", "")).strip()
+        if item["kind"] == "chunk":
+            text = item["text"].strip()
             if not text:
                 continue
-            lines.append(f"[chunk:{item.get('chunk_id')}] {text}")
+            
+            chunk_id = item["chunk_id"]
+            new_chunk_id = inv_chunk_map.get(chunk_id)
+            if new_chunk_id is None:
+                chunk_and_edge_map[f"chunk{chunk_count}"] = chunk_id
+                new_chunk_id = chunk_count
+                chunk_count +=1
+            
+            lines.append(f"[c_id:{new_chunk_id}] {text}")
         else:
-            rel_text = str(item.get("relation_text") or "").strip()
-            chunk_ids = item.get("chunk_ids") or []
+            rel_text = item["relation_text"].strip()
+
+            chunk_ids = item["chunk_ids"]
             chunk_id = chunk_ids[0] if chunk_ids else "unknown"
+            new_chunk_id = inv_chunk_map.get(chunk_id)
+
+            if new_chunk_id is None:
+                chunk_and_edge_map[f"chunk{chunk_count}"] = chunk_id
+                new_chunk_id = chunk_count
+                chunk_count +=1
+
+            edge_id = item["rel_id"]
+            chunk_and_edge_map[f"edge{edge_count}"] = edge_id
             lines.append(
-                f"[edge:{item.get('rel_id')}] " # maybe adding the stuff below, but I think it only adds noise
+                f"[e_id:{edge_count}] " # maybe adding the stuff below, but I think it only adds noise
                 #f"({item.get('source_name')}, {item.get('source_type')}) -> "
                 #f"({item.get('target_name')}, {item.get('target_type')}):\n"
                 f"{rel_text}\n"
-                f"source: {chunk_id}"
+                f"source_id: {new_chunk_id}"
             )
+
+            edge_count += 1
+
     return "\n".join(lines)
 
 def edge_search(session, query_embedding: List[float], entities: List[QueryEntity], time_range: TimestampRange, max_edges: int) -> List[Dict[str, object]]:
@@ -398,7 +425,7 @@ def retrieve(question: str, max_edges: int = 12, max_chunks: int = 9) -> Dict[st
             #[],
             chunks, 
             _rrf_k())
-        context = format_context(fused)
+        context, _ = format_context(fused) #the map ids to real ids map isnt used (yet)
 
     driver.close()
     return {

@@ -224,9 +224,9 @@ def calc_stats_unanswerable(eval_metric_objs):
             
 
 def eval_rag_output_dir(data_dir: Path, stems_to_ignore:set[str]={}):
-    api_key = os.environ["LLM_API_KEY"]
-    base_url = os.environ["BASE_URL"] 
-    model = os.environ["MODEL"] 
+    api_key = os.environ["MODEL_API_KEY"]
+    base_url = os.environ["MODEL_BASE_URL"]
+    model = os.environ["LLM_MODEL"]
     
     client = OpenAI(api_key=api_key, base_url=base_url)
     
@@ -295,7 +295,7 @@ def eval_rag_output_dir(data_dir: Path, stems_to_ignore:set[str]={}):
 if __name__ == "__main__":
     load_dotenv()
     start_ts = time.time()
-    eval_rag_output_dir(Path("rag_results_to_evaluate/daniel_diy_tkg_big"), stems_to_ignore={"vec_search_tkg_answers", "edge_search_tkg_answers", 
+    eval_rag_output_dir(Path("eval/rag_results_to_evaluate/daniel_diy_tkg_big"), stems_to_ignore={"vec_search_tkg_answers", "edge_search_tkg_answers", 
                                                                                              #"vec_and_edge_search_tkg_answers"
                                                                                              })
     #eval_rag_output_dir(Path("rag_results_to_evaluate/tkg_from_paper"))
