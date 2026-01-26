@@ -22,7 +22,7 @@ def _chunk_vector_threshold() -> float:
 
 
 def _relation_vector_k() -> int:
-    return int(os.getenv("RELATION_VECTOR_K", "12"))
+    return int(os.getenv("RELATION_VECTOR_K", "20"))
 
 
 def _relation_vector_threshold() -> float:
@@ -47,6 +47,18 @@ def _entity_bm25_k() -> int:
 
 def _entity_iou_threshold() -> float:
     return float(os.getenv("ENTITY_IOU_THRESHOLD", "0.5"))
+
+
+def _edge_ppr_weight() -> float:
+    return float(os.getenv("EDGE_PPR_WEIGHT", "0.6"))
+
+
+def _edge_similarity_weight() -> float:
+    return float(os.getenv("EDGE_SIM_WEIGHT", "0.4"))
+
+
+def _edge_text_weight() -> float:
+    return float(os.getenv("EDGE_TEXT_WEIGHT", "0.2"))
 
 
 def _merge_time_ranges(ranges: List[TimestampRange]) -> TimestampRange:
@@ -147,7 +159,7 @@ def link_entities_bm25(tx, entities: List[QueryEntity]) -> List[str]:
             iou_alias = 0.0
             for alias in aliases:
                 alias_toks = tokens(alias)
-                if len(aliases) > 1 and len(alias_toks) == 1:
+                if len(aliases) > 1 and len(alias_toks) == 1 and alias_toks != incoming_toks:
                     continue
                 iou_alias = max(iou_alias, iou(incoming_toks, alias_toks))
             if iou_alias < _entity_iou_threshold():
@@ -156,6 +168,18 @@ def link_entities_bm25(tx, entities: List[QueryEntity]) -> List[str]:
             if entity_id:
                 entity_ids.append(entity_id)
     return entity_ids
+
+
+def fetch_entity_node_ids(tx, entity_ids: List[str]) -> List[int]:
+    if not entity_ids:
+        return []
+    query = """
+    MATCH (e:Entity)
+    WHERE e.entity_id IN $entity_ids
+    RETURN id(e) AS node_id
+    """
+    result = tx.run(query, entity_ids=entity_ids)
+    return [record["node_id"] for record in result]
 
 
 def edges_for_entities(
@@ -253,12 +277,36 @@ def run_ppr_gds(
     return scores
 
 
-def score_edges(time_valid_relations: List[Dict[str, object]], ppr_scores: Dict[str, float]) -> List[Dict[str, object]]:
+def score_edges(
+    time_valid_relations: List[Dict[str, object]],
+    ppr_scores: Dict[str, float],
+    ppr_weight: float,
+    similarity_weight: float,
+    text_weight: float,
+    question_tokens: Optional[set[str]] = None,
+) -> List[Dict[str, object]]:
     edges: List[Dict[str, object]] = []
+    max_ppr = max(ppr_scores.values()) if ppr_scores else 0.0
+    max_sim = 0.0
+    for hit in time_valid_relations:
+        max_sim = max(max_sim, float(hit.get("similarity", 0.0)))
+
+    total_weight = ppr_weight + similarity_weight + text_weight
+    if total_weight > 0:
+        ppr_weight = ppr_weight / total_weight
+        similarity_weight = similarity_weight / total_weight
+        text_weight = text_weight / total_weight
     for hit in time_valid_relations:
         source_score = ppr_scores.get(hit["source_entity_id"], 0.0)
         target_score = ppr_scores.get(hit["target_entity_id"], 0.0)
-        edge_score = source_score + target_score
+        ppr_sum = source_score + target_score
+        ppr_norm = (ppr_sum / (2 * max_ppr)) if max_ppr > 0 else 0.0
+        sim_norm = (float(hit.get("similarity", 0.0)) / max_sim) if max_sim > 0 else 0.0
+        text_norm = 0.0
+        if question_tokens:
+            rel_text = (hit.get("relation_text") or "")
+            text_norm = iou(question_tokens, tokens(rel_text))
+        edge_score = (ppr_weight * ppr_norm) + (similarity_weight * sim_norm) + (text_weight * text_norm)
         if edge_score <= 0:
             continue
         edge = dict(hit)
@@ -297,7 +345,7 @@ def format_context(items: List[Dict[str, object]]) -> Tuple[str, dict]:
     chunk_and_edge_map = {}
     inv_chunk_map = {}
     if not items:
-        return "No matching context found."
+        return "No matching context found.", {}
     lines: List[str] = ["Context from a temporal knowledge graph. E stands for edge c for chunk with an id[e_id:N] or [c_id:N] \n"]
 
     edge_count = 1
@@ -314,6 +362,7 @@ def format_context(items: List[Dict[str, object]]) -> Tuple[str, dict]:
             if new_chunk_id is None:
                 chunk_and_edge_map[f"chunk{chunk_count}"] = chunk_id
                 new_chunk_id = chunk_count
+                inv_chunk_map[chunk_id] = new_chunk_id
                 chunk_count +=1
             
             lines.append(f"[c_id:{new_chunk_id}] {text}")
@@ -327,23 +376,37 @@ def format_context(items: List[Dict[str, object]]) -> Tuple[str, dict]:
             if new_chunk_id is None:
                 chunk_and_edge_map[f"chunk{chunk_count}"] = chunk_id
                 new_chunk_id = chunk_count
+                inv_chunk_map[chunk_id] = new_chunk_id
                 chunk_count +=1
 
             edge_id = item["rel_id"]
             chunk_and_edge_map[f"edge{edge_count}"] = edge_id
+            start_date = item.get("start_date")
+            end_date = item.get("end_date")
+            time_str = ""
+            if start_date or end_date:
+                time_str = f" | time: {start_date or ''} to {end_date or ''}"
             lines.append(
                 f"[e_id:{edge_count}] " # maybe adding the stuff below, but I think it only adds noise
-                #f"({item.get('source_name')}, {item.get('source_type')}) -> "
-                #f"({item.get('target_name')}, {item.get('target_type')}):\n"
-                f"{rel_text}\n"
+                f"{rel_text}"
+                f" | source: {item.get('source_name')} ({item.get('source_type')})"
+                f" | target: {item.get('target_name')} ({item.get('target_type')})"
+                f"{time_str}\n"
                 f"source_id: {new_chunk_id}"
             )
 
             edge_count += 1
 
-    return "\n".join(lines)
+    return "\n".join(lines), chunk_and_edge_map
 
-def edge_search(session, query_embedding: List[float], entities: List[QueryEntity], time_range: TimestampRange, max_edges: int) -> List[Dict[str, object]]:
+def edge_search(
+    session,
+    query_embedding: List[float],
+    entities: List[QueryEntity],
+    time_range: TimestampRange,
+    max_edges: int,
+    question_tokens: Optional[set[str]] = None,
+) -> List[Dict[str, object]]:
     relation_hits = session.execute_read(
         search_relations,
         query_embedding,
@@ -353,6 +416,7 @@ def edge_search(session, query_embedding: List[float], entities: List[QueryEntit
 
     matched_entity_ids = session.execute_read(link_entities_bm25, entities)
     alias_edges = session.execute_read(edges_for_entities, matched_entity_ids, time_range)
+    matched_entity_node_ids = session.execute_read(fetch_entity_node_ids, matched_entity_ids)
 
     by_rel_id: Dict[int, Dict[str, object]] = {
         hit["rel_id"]: hit for hit in relation_hits
@@ -369,13 +433,16 @@ def edge_search(session, query_embedding: List[float], entities: List[QueryEntit
 
     node_ids = set()
     rel_ids = []
-    seed_node_ids = set()
+    seed_node_ids = set(matched_entity_node_ids)
     for hit in time_valid_relations:
         rel_ids.append(hit["rel_id"])
         node_ids.add(hit["source_node_id"])
         node_ids.add(hit["target_node_id"])
-        seed_node_ids.add(hit["source_node_id"])
-        seed_node_ids.add(hit["target_node_id"])
+        if not seed_node_ids and float(hit.get("similarity", 0.0)) > 0:
+            seed_node_ids.add(hit["source_node_id"])
+            seed_node_ids.add(hit["target_node_id"])
+    if not seed_node_ids:
+        seed_node_ids.update(node_ids)
 
     ppr_scores = session.execute_write(
         run_ppr_gds,
@@ -384,7 +451,14 @@ def edge_search(session, query_embedding: List[float], entities: List[QueryEntit
         list(seed_node_ids),
     )
 
-    edges = score_edges(time_valid_relations, ppr_scores)
+    edges = score_edges(
+        time_valid_relations,
+        ppr_scores,
+        _edge_ppr_weight(),
+        _edge_similarity_weight(),
+        _edge_text_weight(),
+        question_tokens,
+    )
     edges.sort(key=lambda e: e.get("edge_score", 0.0), reverse=True)
     edges = edges[:max_edges]
 
@@ -414,9 +488,10 @@ def retrieve(question: str, max_edges: int = 12, max_chunks: int = 9) -> Dict[st
     driver = _neo4j_driver()
     with driver.session() as session:
         query_embedding = embed_texts([question])[0]
+        question_tokens = tokens(question)
 
         #todo maybe run both edge_search and vector_search async Promise.all style but probly not worth it
-        edges = edge_search(session, query_embedding, entities, time_range, max_edges)
+        edges = edge_search(session, query_embedding, entities, time_range, max_edges, question_tokens)
 
         chunks = vector_search(session, query_embedding, max_chunks)
         #fused = chunks

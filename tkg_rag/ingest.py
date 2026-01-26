@@ -316,6 +316,11 @@ def parse_timestamp_range(name: str) -> TimestampRange:
         return TimestampRange(name, name)
     if re.match(r"^\d{4}$", name):
         return TimestampRange(f"{name}-01-01", f"{name}-12-31")
+    y_range = re.match(r"^(?P<y1>\d{4})\s*(?:-\s*|to\s+)(?P<y2>\d{4})$", name)
+    if y_range:
+        y1 = int(y_range.group("y1"))
+        y2 = int(y_range.group("y2"))
+        return TimestampRange(f"{y1}-01-01", f"{y2}-12-31")
     m_range = re.match(
         r"^(?P<m1>[A-Za-z]+)\s*(?:-\s*|to\s+)(?P<m2>[A-Za-z]+)\s*(?P<y>\d{4})$",
         name,

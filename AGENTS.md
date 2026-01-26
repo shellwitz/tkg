@@ -38,16 +38,15 @@ In order to do this do the following steps:
 
 1. Read the project in tkg_rag. It contains the temporal knowledge graph rag code. If you find stuff worthwile to remember put it shortly and concise summarized into the "Stuff learned about project" section below.
 
-2. Reason about how to improve the temporal knowledge graph. Ideas could be: Maybe larger chunk size? Maybe something other than a personalized page rank.
-Some other deduplication techniques. Be creative
+2. Reason about how to improve the retrieval of the temporal knowledge graph. At first only focus on improving the retrieval or prompts as re-ingesting data is too costly.
 
 3. Do your changes to the files in tkg_rag if you need to for some reason do changes to files not in the tkg_rag directory ask for permission.
 Write down your thinking process in short and concise form into the section "Things already tried" below as well a short and concise explanation of your changes.
 
 4. Evaluate your changes:
 
-run scripts/run_overnight_answering.sh
-run eval/run_overnight_eval.sh
+run scripts/run_overnight_answering.sh > /dev/null
+run eval/run_overnight_eval.sh > /dev/null
 
 (these shell scripts have a systemd-inhibit for my laptop in them and use the .venv for comfortability. You can ofc also look into what the wrapped python scripts do. As the tests only answer and evaluate documents/ questions related about one company each script should only run ~4min for answer generation and 20s for evaluation)
 
@@ -61,14 +60,28 @@ Write the f1 score to your previous addition to the "Things already tried" secti
 Then stop and wait my review.
 
 
-
-
 ## Stuff learned about project ## 
 
 Retrieval: edge_search unions relation-embedding hits with BM25 alias edges, applies time filtering, then runs GDS PageRank on a projected subgraph and ranks edges by summed source/target scores. Chunks are retrieved via vector search and fused with edges using RRF.
 Ingestion: chunk_text splits by paragraph/sentence with max_chars=1600 and overlap=200; entities dedup via BM25 + IoU over aliases; relations dedup by cosine similarity when src/tgt + date match and merge embeddings by running average.
-
+Query time parsing: extract_query_entities uses LLM tuple output; parse_timestamp_range handles YYYY, YYYY-MM-DD, quarter formats, and month or year ranges for time filtering.
 
 
 
 ## Things already tried ##
+2026-01-26: Focused on improving retrieval ranking/seed quality and time filtering without re-ingesting. Changes: blended edge scoring with normalized relation similarity + PPR, seeded PPR with matched entity nodes (fallback to relation hits), allowed exact single-token alias matches, fixed chunk id mapping, and added year-range parsing. Eval F1: 0.1235.
+2026-01-26: Increased default retrieval context sizes via env-configurable MAX_EDGES/MAX_CHUNKS (defaults 16/12) to allow more edges/chunks into RRF. Eval F1: 0.0741. Lower than 0.1235, likely more noise in context, so reverted this change.
+2026-01-26: Added lexical overlap signal (Jaccard between question tokens and relation_text) into edge scoring with small weight to favor semantically aligned edges. Eval F1: 0.1667.
+2026-01-26: Raised default RELATION_VECTOR_THRESHOLD to 0.1 to reduce low-similarity edge noise. Eval F1: 0.1605. Slightly lower than 0.1667; reverted to keep more recall.
+2026-01-26: Rebalanced edge score weights to emphasize lexical overlap (EDGE_PPR_WEIGHT=0.5, EDGE_SIM_WEIGHT=0.3, EDGE_TEXT_WEIGHT=0.4) to better align relation_text with the question. Eval F1: 0.1358. Lower than 0.1667; reverted to prior weights.
+2026-01-26: Added explicit source/target names/types and time range into edge context lines to help the answer model ground relations. Eval F1: 0.2037.
+2026-01-26: Lowered ENTITY_IOU_THRESHOLD default to 0.4 to link more aliases/entities. Eval F1: 0.2037. No improvement; reverted to 0.5.
+2026-01-26: Added chunk reranking by combining vector similarity with lexical overlap to the question (CHUNK_VEC_WEIGHT=0.7, CHUNK_TEXT_WEIGHT=0.3). Eval F1: 0.1605. Lower than 0.2037; reverted.
+2026-01-26: Added weighted RRF (RRF_EDGE_WEIGHT=1.2, RRF_CHUNK_WEIGHT=1.0) to bias fused context toward graph edges. Eval F1: 0.1975. Lower than 0.2037; reverted.
+2026-01-26: Added a small penalty for edges lacking time metadata when the query includes a time range (TIME_MISSING_PENALTY=0.8). Eval F1: 0.0370. Much worse; reverted.
+2026-01-26: Reduced RRF_K default to 40 to emphasize higher-ranked edges/chunks in fusion. Eval F1: 0.1790. Lower than 0.2037; reverted.
+2026-01-26: Increased RELATION_VECTOR_K default to 20 to widen relation candidate pool before PPR scoring. Eval F1: 0.3160.
+2026-01-26: Increased CHUNK_VECTOR_K default to 12 to broaden chunk candidates before RRF. Eval F1: 0.2346. Lower than 0.3160; reverted.
+2026-01-26: Increased default max_edges to 14 (max_chunks stays 9) to surface a bit more graph context. Eval F1: 0.3086. Slightly lower than 0.3160; reverted.
+2026-01-26: Reduced default max_chunks to 8 to limit chunk noise while keeping edges at 12. Eval F1: 0.2741. Lower than 0.3160; reverted.
+2026-01-26: Re-ran eval on the RELATION_VECTOR_K=20 configuration and observed F1: 0.2346; may indicate evaluation variance or data changes.

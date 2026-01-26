@@ -103,7 +103,7 @@ RAG_RESPOSE_SYS_PROMPT = """
     - Only say "No explicit evidence" if you truly have no relevant information at all
     - For temporal queries, be flexible with temporal expressions (e.g., "2023 Q4" vs "fourth quarter of 2023")
     - If the question asks for comparisons or trends, provide the available data even if incomplete
-    - Use the data tables as your primary source of information
+    - Use the provided data as your primary source of information. Dont give source references unless asked to do so.
 """
 
 #this and above should be used when calling the LLM to generate a response
