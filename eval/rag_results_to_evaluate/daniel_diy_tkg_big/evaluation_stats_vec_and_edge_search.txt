@@ -17,3 +17,4 @@ Answerable Questions - F1 Score: 0.3086
 Answerable Questions - F1 Score: 0.2741
 Answerable Questions - F1 Score: 0.2346
 Answerable Questions - F1 Score: 0.2346
+Answerable Questions - F1 Score: 0.3148

@@ -312,8 +312,61 @@ def parse_timestamp_range(name: str) -> TimestampRange:
             return None
         return month_map.get(month.strip().lower())
 
+    def _parse_single_bound(text: str, is_start: bool) -> Optional[str]:
+        text = text.strip()
+        if not text:
+            return None
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", text):
+            return text
+        m_ym = re.match(r"^(?P<y>\d{4})-(?P<m>\d{2})$", text)
+        if m_ym:
+            y = int(m_ym.group("y"))
+            m = int(m_ym.group("m"))
+            end_day = calendar.monthrange(y, m)[1]
+            return f"{y}-{m:02d}-01" if is_start else f"{y}-{m:02d}-{end_day:02d}"
+        m_y = re.match(r"^(?P<m>[A-Za-z]+)\s+(?P<y>\d{4})$", text, re.IGNORECASE)
+        if m_y:
+            m = _month_num(m_y.group("m"))
+            y = int(m_y.group("y"))
+            if m:
+                end_day = calendar.monthrange(y, m)[1]
+                return f"{y}-{m:02d}-01" if is_start else f"{y}-{m:02d}-{end_day:02d}"
+        if re.match(r"^\d{4}$", text):
+            y = int(text)
+            return f"{y}-01-01" if is_start else f"{y}-12-31"
+        q_match = re.match(r"^(?:Q([1-4])\s*(\d{4})|(\d{4})-Q([1-4]))$", text)
+        if q_match:
+            q = int(q_match.group(1) or q_match.group(4))
+            y = int(q_match.group(2) or q_match.group(3))
+            start_month = 3 * (q - 1) + 1
+            end_month = start_month + 2
+            end_day = calendar.monthrange(y, end_month)[1]
+            return (
+                f"{y}-{start_month:02d}-01"
+                if is_start
+                else f"{y}-{end_month:02d}-{end_day:02d}"
+            )
+        return None
+
+    range_match = re.match(r"^(?P<start>.*)\s+to\s+(?P<end>.*)$", name, re.IGNORECASE)
+    if not range_match:
+        range_match = re.match(r"^(?P<start>.*)\s+to\s*$", name, re.IGNORECASE)
+    if not range_match:
+        range_match = re.match(r"^\s*to\s+(?P<end>.*)$", name, re.IGNORECASE)
+    if range_match:
+        start_raw = (range_match.groupdict().get("start") or "").strip()
+        end_raw = (range_match.groupdict().get("end") or "").strip()
+        start = _parse_single_bound(start_raw, True)
+        end = _parse_single_bound(end_raw, False)
+        if start or end:
+            return TimestampRange(start, end)
+
     if re.match(r"^\d{4}-\d{2}-\d{2}$", name):
         return TimestampRange(name, name)
+    if re.match(r"^\d{4}-\d{2}$", name):
+        start = _parse_single_bound(name, True)
+        end = _parse_single_bound(name, False)
+        return TimestampRange(start, end)
     if re.match(r"^\d{4}$", name):
         return TimestampRange(f"{name}-01-01", f"{name}-12-31")
     y_range = re.match(r"^(?P<y1>\d{4})\s*(?:-\s*|to\s+)(?P<y2>\d{4})$", name)
@@ -321,6 +374,13 @@ def parse_timestamp_range(name: str) -> TimestampRange:
         y1 = int(y_range.group("y1"))
         y2 = int(y_range.group("y2"))
         return TimestampRange(f"{y1}-01-01", f"{y2}-12-31")
+    m_single = re.match(r"^(?P<m>[A-Za-z]+)\s+(?P<y>\d{4})$", name, re.IGNORECASE)
+    if m_single:
+        m = _month_num(m_single.group("m"))
+        y = int(m_single.group("y"))
+        if m:
+            end_day = calendar.monthrange(y, m)[1]
+            return TimestampRange(f"{y}-{m:02d}-01", f"{y}-{m:02d}-{end_day:02d}")
     m_range = re.match(
         r"^(?P<m1>[A-Za-z]+)\s*(?:-\s*|to\s+)(?P<m2>[A-Za-z]+)\s*(?P<y>\d{4})$",
         name,
@@ -738,7 +798,9 @@ def ingest_text(
                     tgt_id = entity_ids.get(rel.target_entity)
                     if not src_id or not tgt_id:
                         continue
-                    tr = timestamp_ranges.get(rel.timestamp_entity, TimestampRange(None, None))
+                    tr = timestamp_ranges.get(rel.timestamp_entity)
+                    if tr is None:
+                        tr = parse_timestamp_range(rel.timestamp_entity)
                     create_relationship(
                         tx,
                         src_id,

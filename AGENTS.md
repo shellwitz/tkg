@@ -38,17 +38,41 @@ In order to do this do the following steps:
 
 1. Read the project in tkg_rag. It contains the temporal knowledge graph rag code. If you find stuff worthwile to remember put it shortly and concise summarized into the "Stuff learned about project" section below.
 
-2. Reason about how to improve the retrieval of the temporal knowledge graph. At first only focus on improving the retrieval or prompts as re-ingesting data is too costly.
+2. You may want to look into how the data is currently stored in the neo4j db. An example query that you might want to execute is:
 
-3. Do your changes to the files in tkg_rag if you need to for some reason do changes to files not in the tkg_rag directory ask for permission.
+docker exec tkg-neo4j cypher-shell   -u neo4j   -p passworty  "MATCH (n)-[r]->(m)
+RETURN
+  CASE
+    WHEN n:Entity  THEN n.name
+    WHEN n:Chunk   THEN left(n.text, 80)
+    WHEN n:Source  THEN n.uri
+    ELSE toString(id(n))
+  END AS from,
+  type(r) AS edge,
+  CASE
+    WHEN m:Entity  THEN m.name
+    WHEN m:Chunk   THEN left(m.text, 80)
+    WHEN m:Source  THEN m.uri
+    ELSE toString(id(m))
+  END AS to
+LIMIT 20;"
+
+If you for some reason make changes to the schema.cypher or Dockerfile dont forget to rebuild the container taking it down and then doing something like docker compose -d --build
+
+If you do such cypher commands always limit the amount of data you receive and dont query for the vector embeddings as this would polute your context window! 
+
+3. Reason about how to improve the retrieval of the temporal knowledge graph. At first only focus on improving the retrieval or prompts as re-ingesting data is too costly.
+
+4. Do your changes to the files in tkg_rag if you need to for some reason do changes to files not in the tkg_rag directory ask for permission.
 Write down your thinking process in short and concise form into the section "Things already tried" below as well a short and concise explanation of your changes.
 
-4. Evaluate your changes:
+5. Evaluate your changes:
 
+run scripts/run_overnight_ingestion.sh > /dev/null
 run scripts/run_overnight_answering.sh > /dev/null
 run eval/run_overnight_eval.sh > /dev/null
 
-(these shell scripts have a systemd-inhibit for my laptop in them and use the .venv for comfortability. You can ofc also look into what the wrapped python scripts do. As the tests only answer and evaluate documents/ questions related about one company each script should only run ~4min for answer generation and 20s for evaluation)
+(these shell scripts have a systemd-inhibit for my laptop in them and use the .venv for comfortability. You can ofc also look into what the wrapped python scripts do. As the tests only answer and evaluate documents/ questions related about one company each script should only run ~40min for ingestion ~4min for answer generation and 20s for evaluation)
 
 Do not read the output of the scripts you run. It will polute and overwhelm your context!
 
@@ -57,7 +81,11 @@ has improved.
 
 Write the f1 score to your previous addition to the "Things already tried" section.
 
-Then stop and wait my review.
+If you achieved a new max f1 score run git add. and git commit -m" 'A short commit message describing what you did' + f1 score"
+
+In the last session we managed to increase the f1 score by improving the retrieval (but then unfortunately could not find the codebase that produced these results or the llm as a judge doesnt behave deterministically at temperature 0. Whatever still good results. You got this :))
+
+In this session you should focus more on the ingestion part. Of course at first also think about the broad picture and you are also allowed to change the retrieval or prompts.py code...
 
 
 ## Stuff learned about project ## 
@@ -65,6 +93,7 @@ Then stop and wait my review.
 Retrieval: edge_search unions relation-embedding hits with BM25 alias edges, applies time filtering, then runs GDS PageRank on a projected subgraph and ranks edges by summed source/target scores. Chunks are retrieved via vector search and fused with edges using RRF.
 Ingestion: chunk_text splits by paragraph/sentence with max_chars=1600 and overlap=200; entities dedup via BM25 + IoU over aliases; relations dedup by cosine similarity when src/tgt + date match and merge embeddings by running average.
 Query time parsing: extract_query_entities uses LLM tuple output; parse_timestamp_range handles YYYY, YYYY-MM-DD, quarter formats, and month or year ranges for time filtering.
+LLM extraction prompt expects timestamp entities as normalized date ranges like "YYYY-MM-DD to YYYY-MM-DD"; ingest now needs to parse those ranges to attach start/end dates.
 
 
 
@@ -85,3 +114,6 @@ Query time parsing: extract_query_entities uses LLM tuple output; parse_timestam
 2026-01-26: Increased default max_edges to 14 (max_chunks stays 9) to surface a bit more graph context. Eval F1: 0.3086. Slightly lower than 0.3160; reverted.
 2026-01-26: Reduced default max_chunks to 8 to limit chunk noise while keeping edges at 12. Eval F1: 0.2741. Lower than 0.3160; reverted.
 2026-01-26: Re-ran eval on the RELATION_VECTOR_K=20 configuration and observed F1: 0.2346; may indicate evaluation variance or data changes.
+
+# Ingestion focussed changes #
+2026-01-26: Hypothesis: time ranges emitted by the extraction prompt ("YYYY-MM-DD to YYYY-MM-DD", open-ended) were not being parsed, so edges lost start/end dates and time filtering underperformed. Changes: parse numeric/month/year/quarter ranges with "to" (including open-ended) and add fallback parsing from relation timestamp strings when they don't match extracted timestamp entities. Eval F1: 0.3148.
