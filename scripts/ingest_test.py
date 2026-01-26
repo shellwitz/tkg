@@ -14,6 +14,7 @@ load_dotenv()
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from scripts.answer_test import STOCK_CODES
 from tkg_rag.logging_utils import setup_logging
 from tkg_rag.ingest import ingest_text
 
@@ -28,9 +29,6 @@ def insert_simple(base_data):
     end_ts = time.time()
     logger.info("Ingestion time: %.2f seconds", end_ts - start_ts)
     logger.info("%s", output)
-
-
-QUESTION_INDICES = range(10) #[4, 5, 6,7, 8]
 
 def insert_all(base_data):
     all_start_ts = time.time()
@@ -53,37 +51,14 @@ def insert_all(base_data):
     all_end_ts = time.time()
     logger.info("Total ingestion time for all documents: %.2f seconds", all_end_ts - all_start_ts)
 
-def insert_wrt_q_indices(base_data):
-
-    with open("ect-qa/questions/local_base.jsonl", "r") as f:
-        questions = f.readlines()
-
-    base_data_stock_code_map = defaultdict(list)
-
-    for line in base_data:
-        info = json.loads(line)
-        base_data_stock_code_map[info["stock_code"]].append(info)
-
-    to_insert = []
-
-    question_objs = []
-
-    for i in QUESTION_INDICES:
-        question_obj = json.loads(questions[i])
-        evidence_list = question_obj["evidence_list"]
-        question_objs.append(question_obj)
-
-        if not evidence_list: #unanswerable question
-            continue
-        stock_codes = {e["stock_code"] for e in evidence_list} #no clue if there actually exist more than one stock codes for evidence
-
-        for stock_code in stock_codes:
-            to_insert.extend(base_data_stock_code_map[stock_code])
-    
+def insert_wrt_q_stock_codes(base_data):
     all_start_ts = time.time()
 
-    stock_codes_to_insert = {entry["stock_code"] for entry in to_insert}
-    logger.info("Ingesting documents for stock codes: %s", ", ".join(stock_codes_to_insert))
+    to_insert = []
+    for line in base_data:
+        info = json.loads(line)
+        if info["stock_code"] in STOCK_CODES:
+            to_insert.append(info)
 
     for i, entry in enumerate(to_insert):
         text = entry["raw_content"]
@@ -108,7 +83,7 @@ def main():
     parser = argparse.ArgumentParser(description="Ingest test data into Neo4j.")
     parser.add_argument("-f", "--fresh", action="store_true", help="Reset the environment.")
     parser.add_argument("-fb", "--fresh-build", action="store_true", help="Rebuild docker images and restart containers.")
-    parser.add_argument("-q", "--question-indices", action="store_true", help="Use 5 questions with solutions to then be able to compare RAG output to solutions.")
+    parser.add_argument("-q", "--question-stock-codes", action="store_true", help="Use predefined questions corresponding to predefined stock codes with solutions to then be able to compare RAG output to solutions.")
     parser.add_argument("-a", "--all", action="store_true", help="Ingest all documents in base.jsonl.")
     args = parser.parse_args()
 
@@ -131,8 +106,8 @@ def main():
     with open("ect-qa/extracted/corpus/base.jsonl", "r") as f:
         base_data = f.readlines()
 
-        if args.question_indices:
-            insert_wrt_q_indices(base_data)
+        if args.question_stock_codes:
+            insert_wrt_q_stock_codes(base_data)
         elif args.all:
             insert_all(base_data)
         else:

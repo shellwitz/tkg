@@ -382,28 +382,29 @@ def vector_search(session, query_embedding: List[float], max_chunks: int) -> Lis
 
     return chunks
 
-def retrieve(question: str, max_edges: int = 50, max_chunks: int = 12) -> Dict[str, object]:
+def retrieve(question: str, max_edges: int = 12, max_chunks: int = 9) -> Dict[str, object]:
     entities, time_range = extract_query_entities_and_time(question)
     driver = _neo4j_driver()
     with driver.session() as session:
         query_embedding = embed_texts([question])[0]
 
         #todo maybe run both edge_search and vector_search async Promise.all style but probly not worth it
-        #edges = edge_search(session, query_embedding, entities, time_range, max_edges)
+        edges = edge_search(session, query_embedding, entities, time_range, max_edges)
 
         chunks = vector_search(session, query_embedding, max_chunks)
         #fused = chunks
         fused = rrf_fuse(
-            #edges,
-            [],
-            chunks, _rrf_k())
+            edges,
+            #[],
+            chunks, 
+            _rrf_k())
         context = format_context(fused)
 
     driver.close()
     return {
         "question": question,
         "time_range": time_range,
-        #"edges": edges,
+        "edges": edges,
         "chunks": chunks,
         "context": context,
     }
