@@ -9,7 +9,6 @@ import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import calendar
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from neo4j import GraphDatabase
@@ -25,6 +24,7 @@ from .settings import (
     RELATION_DEDUP_SIM_THRESHOLD,
 )
 from .text_utils import iou, tokens
+from .time_parsing import parse_timestamp_range
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +41,6 @@ class ExtractedRelation:
     source_entity: str
     target_entity: str
     description: str
-
-
-@dataclass
-class TimestampRange:
-    start_date: Optional[str]
-    end_date: Optional[str]
 
 
 DEFAULT_TIME_TYPES = ["date", "date_range", "quarter", "year"]
@@ -80,7 +74,7 @@ def _chunk_units(text: str) -> List[str]:
     return units
 
 
-def chunk_text(text: str, max_chars: int = 1600, overlap: int = 200) -> List[str]:
+def chunk_text(text: str, max_chars: int = 5000, overlap: int = 200) -> List[str]:
     if not text:
         return []
     text = text.strip()
@@ -278,148 +272,6 @@ def parse_extraction_output(
     return entities, relations
 
 
-def parse_timestamp_range(name: str) -> TimestampRange:
-    name = name.strip()
-    month_map = {
-        "january": 1,
-        "jan": 1,
-        "february": 2,
-        "feb": 2,
-        "march": 3,
-        "mar": 3,
-        "april": 4,
-        "apr": 4,
-        "may": 5,
-        "june": 6,
-        "jun": 6,
-        "july": 7,
-        "jul": 7,
-        "august": 8,
-        "aug": 8,
-        "september": 9,
-        "sep": 9,
-        "sept": 9,
-        "october": 10,
-        "oct": 10,
-        "november": 11,
-        "nov": 11,
-        "december": 12,
-        "dec": 12,
-    }
-
-    def _month_num(month: str) -> Optional[int]:
-        if not month:
-            return None
-        return month_map.get(month.strip().lower())
-
-    def _parse_single_bound(text: str, is_start: bool) -> Optional[str]:
-        text = text.strip()
-        if not text:
-            return None
-        if re.match(r"^\d{4}-\d{2}-\d{2}$", text):
-            return text
-        m_ym = re.match(r"^(?P<y>\d{4})-(?P<m>\d{2})$", text)
-        if m_ym:
-            y = int(m_ym.group("y"))
-            m = int(m_ym.group("m"))
-            end_day = calendar.monthrange(y, m)[1]
-            return f"{y}-{m:02d}-01" if is_start else f"{y}-{m:02d}-{end_day:02d}"
-        m_y = re.match(r"^(?P<m>[A-Za-z]+)\s+(?P<y>\d{4})$", text, re.IGNORECASE)
-        if m_y:
-            m = _month_num(m_y.group("m"))
-            y = int(m_y.group("y"))
-            if m:
-                end_day = calendar.monthrange(y, m)[1]
-                return f"{y}-{m:02d}-01" if is_start else f"{y}-{m:02d}-{end_day:02d}"
-        if re.match(r"^\d{4}$", text):
-            y = int(text)
-            return f"{y}-01-01" if is_start else f"{y}-12-31"
-        q_match = re.match(r"^(?:Q([1-4])\s*(\d{4})|(\d{4})-Q([1-4]))$", text)
-        if q_match:
-            q = int(q_match.group(1) or q_match.group(4))
-            y = int(q_match.group(2) or q_match.group(3))
-            start_month = 3 * (q - 1) + 1
-            end_month = start_month + 2
-            end_day = calendar.monthrange(y, end_month)[1]
-            return (
-                f"{y}-{start_month:02d}-01"
-                if is_start
-                else f"{y}-{end_month:02d}-{end_day:02d}"
-            )
-        return None
-
-    range_match = re.match(r"^(?P<start>.*)\s+to\s+(?P<end>.*)$", name, re.IGNORECASE)
-    if not range_match:
-        range_match = re.match(r"^(?P<start>.*)\s+to\s*$", name, re.IGNORECASE)
-    if not range_match:
-        range_match = re.match(r"^\s*to\s+(?P<end>.*)$", name, re.IGNORECASE)
-    if range_match:
-        start_raw = (range_match.groupdict().get("start") or "").strip()
-        end_raw = (range_match.groupdict().get("end") or "").strip()
-        start = _parse_single_bound(start_raw, True)
-        end = _parse_single_bound(end_raw, False)
-        if start or end:
-            return TimestampRange(start, end)
-
-    if re.match(r"^\d{4}-\d{2}-\d{2}$", name):
-        return TimestampRange(name, name)
-    if re.match(r"^\d{4}-\d{2}$", name):
-        start = _parse_single_bound(name, True)
-        end = _parse_single_bound(name, False)
-        return TimestampRange(start, end)
-    if re.match(r"^\d{4}$", name):
-        return TimestampRange(f"{name}-01-01", f"{name}-12-31")
-    y_range = re.match(r"^(?P<y1>\d{4})\s*(?:-\s*|to\s+)(?P<y2>\d{4})$", name)
-    if y_range:
-        y1 = int(y_range.group("y1"))
-        y2 = int(y_range.group("y2"))
-        return TimestampRange(f"{y1}-01-01", f"{y2}-12-31")
-    m_single = re.match(r"^(?P<m>[A-Za-z]+)\s+(?P<y>\d{4})$", name, re.IGNORECASE)
-    if m_single:
-        m = _month_num(m_single.group("m"))
-        y = int(m_single.group("y"))
-        if m:
-            end_day = calendar.monthrange(y, m)[1]
-            return TimestampRange(f"{y}-{m:02d}-01", f"{y}-{m:02d}-{end_day:02d}")
-    m_range = re.match(
-        r"^(?P<m1>[A-Za-z]+)\s*(?:-\s*|to\s+)(?P<m2>[A-Za-z]+)\s*(?P<y>\d{4})$",
-        name,
-        re.IGNORECASE,
-    )
-    if m_range:
-        m1 = _month_num(m_range.group("m1"))
-        m2 = _month_num(m_range.group("m2"))
-        y = int(m_range.group("y"))
-        if m1 and m2:
-            end_day = calendar.monthrange(y, m2)[1]
-            return TimestampRange(f"{y}-{m1:02d}-01", f"{y}-{m2:02d}-{end_day:02d}")
-    m_range = re.match(
-        r"^(?P<m1>[A-Za-z]+)\s+(?P<y1>\d{4})\s*(?:-\s*|to\s+)(?P<m2>[A-Za-z]+)\s+(?P<y2>\d{4})$",
-        name,
-        re.IGNORECASE,
-    )
-    if m_range:
-        m1 = _month_num(m_range.group("m1"))
-        m2 = _month_num(m_range.group("m2"))
-        y1 = int(m_range.group("y1"))
-        y2 = int(m_range.group("y2"))
-        if m1 and m2:
-            end_day = calendar.monthrange(y2, m2)[1]
-            return TimestampRange(f"{y1}-{m1:02d}-01", f"{y2}-{m2:02d}-{end_day:02d}")
-    q_match = re.match(r"^(?:Q([1-4])\s*(\d{4})|(\d{4})-Q([1-4]))$", name)
-    if q_match:
-        q = int(q_match.group(1) or q_match.group(4))
-        y = int(q_match.group(2) or q_match.group(3))
-        start_month = 3 * (q - 1) + 1
-        end_month = start_month + 2
-        end_day = calendar.monthrange(y, end_month)[1]
-        return TimestampRange(
-            f"{y}-{start_month:02d}-01",
-            f"{y}-{end_month:02d}-{end_day:02d}",
-        )
-    return TimestampRange(None, None)
-
-
 def _neo4j_driver():
     uri = os.getenv("NEO4J_URI", "bolt://localhost:7688")
     user = os.getenv("TKG_NEO4J_USER", "neo4j")
@@ -443,6 +295,52 @@ def _entity_type_strict_dedup() -> bool:
     }
 
 
+def _entity_tokens(name: str) -> set[str]:
+    base = tokens(name)
+    if not base:
+        return base
+    single = [t for t in base if len(t) == 1]
+    if len(single) >= 2:
+        base = set(base)
+        base.add("".join(single))
+    return base
+
+
+def _resolve_entity_id(
+    name: str,
+    entity_ids: Dict[str, str],
+    lower_name_index: Dict[str, str],
+) -> Optional[str]:
+    if not name:
+        return None
+    direct = entity_ids.get(name)
+    if direct:
+        return direct
+    lower = name.strip().lower()
+    if lower in lower_name_index:
+        return lower_name_index[lower]
+    incoming_toks = _entity_tokens(name)
+    if not incoming_toks:
+        return None
+    best_name = None
+    best_iou = 0.0
+    second_best = 0.0
+    for cand_name in entity_ids.keys():
+        cand_toks = _entity_tokens(cand_name)
+        if not cand_toks:
+            continue
+        score = iou(incoming_toks, cand_toks)
+        if score > best_iou:
+            second_best = best_iou
+            best_iou = score
+            best_name = cand_name
+        elif score > second_best:
+            second_best = score
+    if best_name and best_iou >= 0.5 and (best_iou - second_best >= 0.15 or second_best < 0.4):
+        return entity_ids.get(best_name)
+    return None
+
+
 def search_entity_by_bm25_and_iou(tx, entity) -> Tuple[Optional[dict], float]:
     K = 10
     query = """
@@ -461,7 +359,7 @@ def search_entity_by_bm25_and_iou(tx, entity) -> Tuple[Optional[dict], float]:
         k=K,
     ))
 
-    incoming_toks = tokens(entity.name)
+    incoming_toks = _entity_tokens(entity.name)
 
     best = None
     best_iou = 0.0
@@ -472,7 +370,7 @@ def search_entity_by_bm25_and_iou(tx, entity) -> Tuple[Optional[dict], float]:
         aliases = node.get("aliases") or []
         iou_alias = 0.0
         for a in aliases:
-            alias_toks = tokens(a)
+            alias_toks = _entity_tokens(a)
             if len(aliases) > 1 and len(alias_toks) ==1:
                 continue  # skip single-token aliases if multiple aliases exist.
                 # EOG Resources Inc -> EOG Resources -> EOG shouldnt further match -> EOG Burgers or so
@@ -526,7 +424,15 @@ def upsert_entity(tx, entity) -> str:
 
 
 def create_chunk(tx, text: str, embedding: List[float], source_id: Optional[str]) -> str:
-    chunk_id = str(uuid.uuid4())
+    counter = tx.run(
+        """
+        MERGE (c:Counter {name: "chunk"})
+        ON CREATE SET c.value = 0
+        SET c.value = c.value + 1
+        RETURN c.value AS value
+        """
+    ).single()
+    chunk_id = f"chunk{counter['value']}"
     tx.run(
         """
         CREATE (c:Chunk {chunk_id: $chunk_id, text: $text, embedding: $embedding})
@@ -548,7 +454,20 @@ def create_chunk(tx, text: str, embedding: List[float], source_id: Optional[str]
     return chunk_id
 
 
-def create_source(tx, source_id: str, uri: Optional[str] = None, last_modified: Optional[str] = None) -> None:
+def create_source(
+    tx,
+    source_id: str,
+    source_name: Optional[str] = None,
+    uri: Optional[str] = None,
+    last_modified: Optional[str] = None,
+) -> None:
+
+    if not source_name and uri:
+        trimmed = uri.rstrip("/")
+        base = os.path.basename(trimmed)
+        source_name = base or trimmed
+    if not source_name:
+        source_name = source_id
     last_modified_param = last_modified
     if isinstance(last_modified, (int, float)):
         if last_modified > 1e12:
@@ -564,6 +483,7 @@ def create_source(tx, source_id: str, uri: Optional[str] = None, last_modified: 
         """
         MERGE (s:Source {source_id: $source_id})
         SET s.uri = coalesce($uri, s.uri),
+            s.name = coalesce(s.name, $name),
             s.last_modified = CASE
                 WHEN $last_modified IS NULL THEN s.last_modified
                 ELSE datetime($last_modified)
@@ -571,6 +491,7 @@ def create_source(tx, source_id: str, uri: Optional[str] = None, last_modified: 
         """,
         source_id=source_id,
         uri=uri,
+        name=source_name,
         last_modified=last_modified_param,
     )
 
@@ -715,6 +636,7 @@ def ingest_text(
     source_id: Optional[str] = None,
     source_uri: Optional[str] = None,
     source_last_modified: Optional[str] = None,
+    source_name: Optional[str] = None,
 ) -> Dict[str, int]:
     chunks = chunk_text(text)
     logger.info("got chunks: %s", len(chunks or []))
@@ -753,6 +675,7 @@ def ingest_text(
         session.execute_write(
             create_source,
             source_id,
+            source_name,
             source_uri,
             source_last_modified,
         )
@@ -784,6 +707,11 @@ def ingest_text(
                         continue
                     entity_id = upsert_entity(tx, entity)
                     entity_ids[entity.name] = entity_id
+                lower_name_index: Dict[str, str] = {}
+                for name, ent_id in entity_ids.items():
+                    lower = name.strip().lower()
+                    if lower and lower not in lower_name_index:
+                        lower_name_index[lower] = ent_id
                 link_chunk_mentions(tx, chunk_id, entity_ids.values())
 
                 relation_embeddings: List[List[float]] = []
@@ -794,8 +722,8 @@ def ingest_text(
 
                 for rel in extracted_relations:
                     relation_embedding = next(relation_embedding_iter)
-                    src_id = entity_ids.get(rel.source_entity)
-                    tgt_id = entity_ids.get(rel.target_entity)
+                    src_id = _resolve_entity_id(rel.source_entity, entity_ids, lower_name_index)
+                    tgt_id = _resolve_entity_id(rel.target_entity, entity_ids, lower_name_index)
                     if not src_id or not tgt_id:
                         continue
                     tr = timestamp_ranges.get(rel.timestamp_entity)

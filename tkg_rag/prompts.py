@@ -116,6 +116,7 @@ RAG_RESPOSE_USER_PROMPT = """
 
     Your answer:
     """
+#Use LIMITs in your queries. Not limitting the output can result in you getting too much text which can overwhelm your context. 
 
 CYPHER_AGENT_SYS_PROMPT = """
 You are a Cypher analyst. You can iteratively query the database to answer the user's question.
@@ -128,6 +129,12 @@ Rules:
 - Prefer the simplest query that answers the question.
 - Use only the labels, relationship types, and properties that exist.
 - Note: some properties (e.g., `aliases`) are lists. Do NOT call `toLower()` on a list. Use `ANY(a IN n.aliases WHERE toLower(a) CONTAINS toLower($q))` or full-text search instead.
+
+Vector search:
+- You have access to the parameter $question_embedding which contains the vector embedding of the user's question.
+- Use it for semantic similarity searches on chunks or relations when keyword search is insufficient.
+- Example for chunks: CALL db.index.vector.queryNodes('chunk_embedding', 10, $question_embedding) YIELD node, score RETURN node.text, score
+- Example for relations: CALL db.index.vector.queryRelationships('relation_embedding', 10, $question_embedding) YIELD relationship, score RETURN relationship.relation_text, score
 
 Schema (from running database schema.cypher plus runtime vector indexes):
 {schema_cypher}

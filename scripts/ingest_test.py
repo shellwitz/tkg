@@ -36,6 +36,7 @@ def insert_all(base_data):
         info = json.loads(line)
         text = info["raw_content"]
         doc_uri = info["stock_code"] + "/" + info["year"] + "/" + info["quarter"]
+        doc_name = info["stock_code"] + "_" + info["year"] + "_" + info["quarter"]
 
         logger.info(
             "Ingesting text data for doc_id %s (%s/%s)",

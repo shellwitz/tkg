@@ -2,12 +2,13 @@ import json
 import os
 import subprocess
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from neo4j import READ_ACCESS, GraphDatabase
 from neo4j.exceptions import Neo4jError
 
 from . import prompts
+from .ingest import embed_texts
 from .llm_client import openai_client
 from .settings import LLM_MODEL
 
@@ -92,10 +93,27 @@ def run_readonly_query(
     cypher: str,
     parameters: Dict[str, Any] | None = None,
     timeout_s: float = 15.0,
+    get_embedding: Optional[Callable[[], List[float]]] = None,
 ) -> List[Dict[str, Any]]:
+    params = dict(parameters or {})
+    # Lazy embedding: only compute if the query uses $question_embedding
+    if get_embedding is not None and "$question_embedding" in cypher:
+        params["question_embedding"] = get_embedding()
     with driver.session(default_access_mode=READ_ACCESS) as session:
-        result = session.run(cypher, parameters or {}, timeout=timeout_s)
+        result = session.run(cypher, params, timeout=timeout_s)
         return [record.data() for record in result]
+
+
+class _Neo4jEncoder(json.JSONEncoder):
+    """Handle Neo4j temporal types and other non-JSON-serializable objects."""
+
+    def default(self, o: Any) -> Any:
+        # neo4j.time.Date, neo4j.time.DateTime, etc.
+        if hasattr(o, "iso_format"):
+            return o.iso_format()
+        if hasattr(o, "isoformat"):
+            return o.isoformat()
+        return super().default(o)
 
 
 def _log_event(log_path: str | None, event: Dict[str, Any]) -> None:
@@ -112,9 +130,9 @@ def _log_event(log_path: str | None, event: Dict[str, Any]) -> None:
         elif event_type == "LLM_OUTPUT":
             handle.write(f"{event.get('content', '')}\n\n")
         elif event_type == "CYPHER_RESULT":
-            handle.write(json.dumps(event.get("rows", []), indent=2, ensure_ascii=True) + "\n\n")
+            handle.write(json.dumps(event.get("rows", []), indent=2, ensure_ascii=True, cls=_Neo4jEncoder) + "\n\n")
         else:
-            handle.write(json.dumps(event, indent=2, ensure_ascii=True) + "\n\n")
+            handle.write(json.dumps(event, indent=2, ensure_ascii=True, cls=_Neo4jEncoder) + "\n\n")
 
 
 def run_cypher_agent(
@@ -133,6 +151,16 @@ def run_cypher_agent(
     schema_text = load_effective_schema_from_container(container=container)
     client = openai_client()
     driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+
+    # Lazy embedding: compute only on first use
+    _cached_embedding: List[float] | None = None
+
+    def get_question_embedding() -> List[float]:
+        nonlocal _cached_embedding
+        if _cached_embedding is None:
+            _cached_embedding = embed_texts([question])[0]
+        return _cached_embedding
+
     try:
         introspection = fetch_db_introspection(driver, timeout_s=min(timeout_s, 5.0))
         system_prompt = _build_system_prompt(schema_text, introspection)
@@ -157,12 +185,21 @@ def run_cypher_agent(
                     "cypher": last_cypher,
                     "rows": last_rows,
                 }
+            
             if not content.startswith("QUERY:"):
-                raise RuntimeError(f"Unexpected agent response: {content[:200]}")
+                messages.append({"role": "assistant", "content": content})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Your output has to either start with 'QUERY:' or 'FINAL:'"
+                    }
+                )
+                continue
+
             cypher = content[len("QUERY:") :].strip()
             last_cypher = cypher
             try:
-                last_rows = run_readonly_query(driver, cypher, timeout_s=timeout_s)
+                last_rows = run_readonly_query(driver, cypher, timeout_s=timeout_s, get_embedding=get_question_embedding)
             except Neo4jError as exc:
                 last_rows = [{"__error__": str(exc)}]
             _log_event(log_path, {"event": "cypher_result", "rows": last_rows})
@@ -172,10 +209,28 @@ def run_cypher_agent(
                     "role": "user",
                     "content": prompts.CYPHER_AGENT_OBSERVATION_PROMPT.format(
                         cypher=cypher,
-                        results=json.dumps(last_rows, indent=2, ensure_ascii=True),
+                        results=json.dumps(last_rows, indent=2, ensure_ascii=True, cls=_Neo4jEncoder),
                     ),
                 }
             )
-        raise RuntimeError("Agent did not produce FINAL within max_steps.")
+        messages.append(
+            {
+                "role": "user",
+                "content": f"""Just give an answer with the available information you got now.
+                Question: {question}"""
+            }
+        )
+
+        response = client.chat.completions.create(
+                model=model or LLM_MODEL,
+                messages=messages,
+                temperature=0,
+            )
+        content = (response.choices[0].message.content or "").strip()
+        return {
+            "answer": content,
+            "cypher": last_cypher,
+            "rows": last_rows,
+        }
     finally:
         driver.close()

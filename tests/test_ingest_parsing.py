@@ -1,6 +1,7 @@
 import unittest
 
-from tkg_rag.ingest import parse_extraction_output, parse_timestamp_range, TimestampRange
+from tkg_rag.ingest import parse_extraction_output
+from tkg_rag.time_parsing import TimestampRange, parse_timestamp_range
 
 
 class TestParseExtractionOutput(unittest.TestCase):
@@ -120,9 +121,9 @@ class TestParseTimestampRange(unittest.TestCase):
             parse_timestamp_range("2021-Q0"),
         )
 
-    def test_rejects_unsupported_format(self) -> None:
+    def test_parses_year_quarter_with_space(self) -> None:
         self.assertEqual(
-            TimestampRange(None, None),
+            TimestampRange("2021-01-01", "2021-03-31"),
             parse_timestamp_range("2021 Q1"),
         )
 

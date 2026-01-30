@@ -2,6 +2,7 @@
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -12,6 +13,7 @@ load_dotenv()
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from tkg_rag.cypher_agent import run_cypher_agent
 from tkg_rag.logging_utils import setup_logging
 from tkg_rag.answer import generate_answer
 from tkg_rag.retrieve import retrieve
@@ -38,6 +40,11 @@ def main() -> None:
         "--question-stock-codes",
         action="store_true",
         help="Use predefined questions for stock codes.",
+    )
+    parser.add_argument(
+        "--agent",
+        action="store_true",
+        help="Use cypher agent instead of RAG for question answering"
     )
     args = parser.parse_args()
 
@@ -67,20 +74,48 @@ def main() -> None:
         with open(ANSWER_PATH, "w") as f:
             start_ts = time.time()
             for i, question_obj in enumerate(question_objs):
-                result = retrieve(question_obj["question"])
-                answer = generate_answer(result["question"], result["context"])
-                logger.info("generated answer: %s/%s", i + 1, len(question_objs))
-                question_obj["predicted_answer"]  = answer
-                question_obj["context"] = result["context"]
+                if args.agent:
+                    result = run_cypher_agent(
+                        question=question_obj["question"],
+                        neo4j_uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+                        neo4j_user=os.getenv("NEO4J_USER", "neo4j"),
+                        neo4j_password=os.getenv("NEO4J_PASSWORD", "passworty"),
+                        container=os.getenv("TKG_NEO4J_CONTAINER", "tkg-neo4j"),
+                        model=os.getenv("AGENT_MODEL"),
+                        timeout_s=float(os.getenv("AGENT_TIMEOUT", "15.0")),
+                        max_steps=int(os.getenv("AGENT_MAX_STEPS", "20")),
+                    )
+                    question_obj["predicted_answer"] = result.get("answer", "")
+                    #question_obj["context"] = json.dumps(result, indent=2)
+                else:
+                    result = retrieve(question_obj["question"])
+                    answer = generate_answer(result["question"], result["context"])
+                    logger.info("generated answer: %s/%s", i + 1, len(question_objs))
+                    question_obj["predicted_answer"]  = answer
+                    question_obj["context"] = result["context"]
 
                 f.write(json.dumps(question_obj) + "\n")
             end_ts = time.time()
             elapsed = end_ts - start_ts
             logger.info("RAG questions eval from question indices took time: %.2f seconds", elapsed)
     else:
-        payload = retrieve(args.question)
-        logger.info("Context:\n%s", payload["context"])
-        logger.info("Answer:\n%s", generate_answer(args.question, payload["context"]))
+        if args.agent:
+            result = run_cypher_agent(
+                question=args.question,
+                neo4j_uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+                neo4j_user=os.getenv("NEO4J_USER", "neo4j"),
+                neo4j_password=os.getenv("NEO4J_PASSWORD", "passworty"),
+                container=os.getenv("TKG_NEO4J_CONTAINER", "tkg-neo4j"),
+                model=os.getenv("AGENT_MODEL"),
+                timeout_s=float(os.getenv("AGENT_TIMEOUT", "15.0")),
+                max_steps=int(os.getenv("AGENT_MAX_STEPS", "15")),
+            )
+            logger.info("Agent Answer:\n%s", result.get("answer", ""))
+            logger.info("Cypher Query:\n%s", result.get("cypher", ""))
+        else:
+            payload = retrieve(args.question)
+            logger.info("Context:\n%s", payload["context"])
+            logger.info("Answer:\n%s", generate_answer(args.question, payload["context"]))
 
 
 if __name__ == "__main__":

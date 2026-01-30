@@ -117,3 +117,5 @@ LLM extraction prompt expects timestamp entities as normalized date ranges like 
 
 # Ingestion focussed changes #
 2026-01-26: Hypothesis: time ranges emitted by the extraction prompt ("YYYY-MM-DD to YYYY-MM-DD", open-ended) were not being parsed, so edges lost start/end dates and time filtering underperformed. Changes: parse numeric/month/year/quarter ranges with "to" (including open-ended) and add fallback parsing from relation timestamp strings when they don't match extracted timestamp entities. Eval F1: 0.3148.
+2026-01-26: Ingestion: resolved relation source/target names more robustly (case-insensitive + IoU with acronym folding) so relations don't drop when LLM uses name variants; expanded timestamp parsing to accept year-before-quarter formats like "2023 Q4". Eval F1: 0.3672.
+2026-01-28: Retrieval: refactored edge_search to seed PPR only from time-relevant relation hits plus matched entities, but run PPR over the full graph; ranked chunks using PPR-derived edge scores with relation-similarity weights; disabled vector chunk search in retrieve. Eval F1: not run.
