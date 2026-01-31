@@ -22,8 +22,10 @@ import time
 logger = logging.getLogger(__name__)
 
 
-STOCK_CODES = {"EOG", 
-               #"SKX", "EPAM US", "CINF",
+STOCK_CODES = {
+    #"EOG", 
+               "SKX",
+               # "EPAM US", "CINF",
                }
 
 def main() -> None:
@@ -49,7 +51,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.question_stock_codes:
-        ANSWER_PATH = "/home/shellwitz/Documents/uni_stuff/nlp_uni/tkg/eval/rag_results_to_evaluate/daniel_diy_tkg_big/vec_and_edge_search.jsonl"
+        ANSWER_PATH = "/home/shellwitz/Documents/uni_stuff/nlp_uni/tkg/eval/rag_results_to_evaluate/daniel_diy_tkg_big/vec_search.jsonl"
         #"/home/shellwitz/Documents/uni_stuff/nlp_uni/tkg_eval/rag_results_to_evaluate/daniel_diy_tkg_big/vec_and_edge_search_less_context_tkg_answers.jsonl"
 
         with open("ect-qa/questions/local_base.jsonl", "r") as f:
@@ -88,7 +90,7 @@ def main() -> None:
                     question_obj["predicted_answer"] = result.get("answer", "")
                     #question_obj["context"] = json.dumps(result, indent=2)
                 else:
-                    result = retrieve(question_obj["question"])
+                    result = retrieve(question_obj["question"], use_only_vec_search=True)
                     answer = generate_answer(result["question"], result["context"])
                     logger.info("generated answer: %s/%s", i + 1, len(question_objs))
                     question_obj["predicted_answer"]  = answer

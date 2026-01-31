@@ -296,8 +296,8 @@ if __name__ == "__main__":
     load_dotenv()
     start_ts = time.time()
     eval_rag_output_dir(Path("eval/rag_results_to_evaluate/daniel_diy_tkg_big"), stems_to_ignore={"vec_search_tkg_answers", "edge_search_tkg_answers", 
-                                                                                              "cypher_agent_answers", "cypher_agent_answers_no_limits"
-                                                                                             }) #"vec_and_edge_search",
+                                                                                              "cypher_agent_answers", "vec_and_edge_search", "cypher_agent_answers_no_limits"
+                                                                                             }) #,
     #eval_rag_output_dir(Path("rag_results_to_evaluate/tkg_from_paper"))
     end_ts = time.time()
     print(f"Total evaluation time: {end_ts - start_ts:.2f} seconds")

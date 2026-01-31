@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from neo4j import READ_ACCESS, GraphDatabase
+from neo4j.graph import Node, Path, Relationship
 from neo4j.exceptions import Neo4jError
 
 from . import prompts
@@ -108,12 +109,36 @@ class _Neo4jEncoder(json.JSONEncoder):
     """Handle Neo4j temporal types and other non-JSON-serializable objects."""
 
     def default(self, o: Any) -> Any:
+        if isinstance(o, Node):
+            return {
+                "_type": "Node",
+                "id": o.id,
+                "labels": list(o.labels),
+                "properties": dict(o),
+            }
+        if isinstance(o, Relationship):
+            return {
+                "_type": "Relationship",
+                "id": o.id,
+                "type": o.type,
+                "properties": dict(o),
+            }
+        if isinstance(o, Path):
+            return {
+                "_type": "Path",
+                "nodes": list(o.nodes),
+                "relationships": list(o.relationships),
+            }
         # neo4j.time.Date, neo4j.time.DateTime, etc.
         if hasattr(o, "iso_format"):
             return o.iso_format()
         if hasattr(o, "isoformat"):
             return o.isoformat()
         return super().default(o)
+
+
+def _normalize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return json.loads(json.dumps(rows, cls=_Neo4jEncoder))
 
 
 def _log_event(log_path: str | None, event: Dict[str, Any]) -> None:
@@ -171,6 +196,7 @@ def run_cypher_agent(
         _log_event(log_path, {"event": "question", "question": question})
         last_cypher = ""
         last_rows: List[Dict[str, Any]] = []
+        steps: List[Dict[str, Any]] = []
         for _ in range(max_steps):
             response = client.chat.completions.create(
                 model=model or LLM_MODEL,
@@ -183,7 +209,8 @@ def run_cypher_agent(
                 return {
                     "answer": content[len("FINAL:") :].strip(),
                     "cypher": last_cypher,
-                    "rows": last_rows,
+                    "rows": _normalize_rows(last_rows),
+                    "steps": steps,
                 }
             
             if not content.startswith("QUERY:"):
@@ -202,6 +229,8 @@ def run_cypher_agent(
                 last_rows = run_readonly_query(driver, cypher, timeout_s=timeout_s, get_embedding=get_question_embedding)
             except Neo4jError as exc:
                 last_rows = [{"__error__": str(exc)}]
+            normalized_rows = _normalize_rows(last_rows)
+            steps.append({"cypher": cypher, "rows": normalized_rows})
             _log_event(log_path, {"event": "cypher_result", "rows": last_rows})
             messages.append({"role": "assistant", "content": content})
             messages.append(
@@ -230,7 +259,124 @@ def run_cypher_agent(
         return {
             "answer": content,
             "cypher": last_cypher,
-            "rows": last_rows,
+            "rows": _normalize_rows(last_rows),
+            "steps": steps,
+        }
+    finally:
+        driver.close()
+
+
+def run_cypher_agent_stream(
+    question: str,
+    neo4j_uri: str,
+    neo4j_user: str,
+    neo4j_password: str,
+    container: str | None = None,
+    model: str | None = None,
+    timeout_s: float = 15.0,
+    max_steps: int = 5,
+    log_path: str | None = None,
+):
+    if not (model or LLM_MODEL):
+        raise RuntimeError("LLM_MODEL is not set.")
+    schema_text = load_effective_schema_from_container(container=container)
+    client = openai_client()
+    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+
+    _cached_embedding: List[float] | None = None
+
+    def get_question_embedding() -> List[float]:
+        nonlocal _cached_embedding
+        if _cached_embedding is None:
+            _cached_embedding = embed_texts([question])[0]
+        return _cached_embedding
+
+    try:
+        introspection = fetch_db_introspection(driver, timeout_s=min(timeout_s, 5.0))
+        system_prompt = _build_system_prompt(schema_text, introspection)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompts.CYPHER_AGENT_QUERY_PROMPT.format(question=question)},
+        ]
+        _log_event(log_path, {"event": "question", "question": question})
+        last_cypher = ""
+        last_rows: List[Dict[str, Any]] = []
+        steps: List[Dict[str, Any]] = []
+        for _ in range(max_steps):
+            response = client.chat.completions.create(
+                model=model or LLM_MODEL,
+                messages=messages,
+                temperature=0,
+            )
+            content = (response.choices[0].message.content or "").strip()
+            _log_event(log_path, {"event": "llm_output", "content": content})
+            if content.startswith("FINAL:"):
+                final_answer = content[len("FINAL:") :].strip()
+                yield {
+                    "event": "final",
+                    "answer": final_answer,
+                    "cypher": last_cypher,
+                    "rows": _normalize_rows(last_rows),
+                    "steps": steps,
+                }
+                return
+
+            if not content.startswith("QUERY:"):
+                messages.append({"role": "assistant", "content": content})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Your output has to either start with 'QUERY:' or 'FINAL:'",
+                    }
+                )
+                continue
+
+            cypher = content[len("QUERY:") :].strip()
+            last_cypher = cypher
+            try:
+                last_rows = run_readonly_query(
+                    driver,
+                    cypher,
+                    timeout_s=timeout_s,
+                    get_embedding=get_question_embedding,
+                )
+            except Neo4jError as exc:
+                last_rows = [{"__error__": str(exc)}]
+            normalized_rows = _normalize_rows(last_rows)
+            step = {"cypher": cypher, "rows": normalized_rows}
+            steps.append(step)
+            _log_event(log_path, {"event": "cypher_result", "rows": last_rows})
+            yield {"event": "step", **step}
+            messages.append({"role": "assistant", "content": content})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": prompts.CYPHER_AGENT_OBSERVATION_PROMPT.format(
+                        cypher=cypher,
+                        results=json.dumps(last_rows, indent=2, ensure_ascii=True, cls=_Neo4jEncoder),
+                    ),
+                }
+            )
+
+        messages.append(
+            {
+                "role": "user",
+                "content": f"""Just give an answer with the available information you got now.
+                Question: {question}""",
+            }
+        )
+        response = client.chat.completions.create(
+            model=model or LLM_MODEL,
+            messages=messages,
+            temperature=0,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        yield {
+            "event": "final",
+            "answer": content,
+            "cypher": last_cypher,
+            "rows": _normalize_rows(last_rows),
+            "steps": steps,
         }
     finally:
         driver.close()

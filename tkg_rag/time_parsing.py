@@ -23,6 +23,22 @@ _QUARTER_RE = re.compile(
 _MONTH_ONLY_RE = re.compile(r"^[A-Za-z]+$")
 
 
+def _validate_date(date_str: Optional[str]) -> Optional[str]:
+    """Validate a date string and fix invalid dates (e.g., Feb 29 in non-leap years)."""
+    if not date_str:
+        return None
+    if not _ISO_DATE_RE.match(date_str):
+        return date_str
+    try:
+        year, month, day = map(int, date_str.split("-"))
+        max_day = calendar.monthrange(year, month)[1]
+        if day > max_day:
+            day = max_day
+        return f"{year:04d}-{month:02d}-{day:02d}"
+    except (ValueError, IndexError):
+        return None
+
+
 def _month_range(year: int, month: int) -> Tuple[str, str]:
     end_day = calendar.monthrange(year, month)[1]
     return f"{year}-{month:02d}-01", f"{year}-{month:02d}-{end_day:02d}"
@@ -126,17 +142,18 @@ def parse_timestamp_range(name: str) -> TimestampRange:
         return TimestampRange(None, None)
 
     if _ISO_DATE_RE.match(name):
-        return TimestampRange(name, name)
+        validated = _validate_date(name)
+        return TimestampRange(validated, validated)
 
     ym_match = _ISO_YEAR_MONTH_RE.match(name)
     if ym_match:
-        start = _parse_single_bound(name, True)
-        end = _parse_single_bound(name, False)
+        start = _validate_date(_parse_single_bound(name, True))
+        end = _validate_date(_parse_single_bound(name, False))
         return TimestampRange(start, end)
 
     if _YEAR_RE.match(name):
-        start = _parse_single_bound(name, True)
-        end = _parse_single_bound(name, False)
+        start = _validate_date(_parse_single_bound(name, True))
+        end = _validate_date(_parse_single_bound(name, False))
         return TimestampRange(start, end)
 
     year_range = re.match(r"^(?P<y1>\d{4})\s*(?:-\s*|to\s+)(?P<y2>\d{4})$", name)
@@ -145,7 +162,7 @@ def parse_timestamp_range(name: str) -> TimestampRange:
         y2 = int(year_range.group("y2"))
         start, _ = _year_range(y1)
         _, end = _year_range(y2)
-        return TimestampRange(start, end)
+        return TimestampRange(_validate_date(start), _validate_date(end))
 
     month_range_single_year = re.match(
         r"^(?P<m1>[A-Za-z]+)\s*(?:-\s*|to\s+)(?P<m2>[A-Za-z]+)\s*(?P<y>\d{4})$",
@@ -159,7 +176,7 @@ def parse_timestamp_range(name: str) -> TimestampRange:
         if m1 and m2:
             start, _ = _month_range(year, m1)
             _, end = _month_range(year, m2)
-            return TimestampRange(start, end)
+            return TimestampRange(_validate_date(start), _validate_date(end))
 
     month_range_dual_year = re.match(
         r"^(?P<m1>[A-Za-z]+)\s+(?P<y1>\d{4})\s*(?:-\s*|to\s+)(?P<m2>[A-Za-z]+)\s+(?P<y2>\d{4})$",
@@ -176,23 +193,23 @@ def parse_timestamp_range(name: str) -> TimestampRange:
         if left and right:
             start, _ = _month_range(left[0], left[1])
             _, end = _month_range(right[0], right[1])
-            return TimestampRange(start, end)
+            return TimestampRange(_validate_date(start), _validate_date(end))
 
     range_split = _split_to_range(name)
     if range_split:
         start_raw, end_raw = range_split
-        start = _parse_single_bound(start_raw, True)
-        end = _parse_single_bound(end_raw, False)
+        start = _validate_date(_parse_single_bound(start_raw, True))
+        end = _validate_date(_parse_single_bound(end_raw, False))
         if start or end:
             return TimestampRange(start, end)
 
     quarter = _parse_quarter(name)
     if quarter:
         start, end = _quarter_range(quarter[0], quarter[1])
-        return TimestampRange(start, end)
+        return TimestampRange(_validate_date(start), _validate_date(end))
 
-    single_start = _parse_single_bound(name, True)
-    single_end = _parse_single_bound(name, False)
+    single_start = _validate_date(_parse_single_bound(name, True))
+    single_end = _validate_date(_parse_single_bound(name, False))
     if single_start or single_end:
         return TimestampRange(single_start, single_end)
 
