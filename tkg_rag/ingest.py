@@ -75,6 +75,7 @@ def _chunk_units(text: str) -> List[str]:
 
 
 def chunk_text(text: str, max_chars: int = 5000, overlap: int = 200) -> List[str]:
+    """Split raw text into sentence-aware chunks with optional character overlap."""
     if not text:
         return []
     text = text.strip()
@@ -162,6 +163,7 @@ def iter_extractions_concurrent(
     retry_base_s: float,
     retry_max_s: float,
 ) -> Iterable[Tuple[int, List[ExtractedEntity], List[ExtractedRelation]]]:
+    """Yield extraction results for chunks using an asyncio worker pool in a thread."""
     if not chunks:
         return []
     max_workers = max(1, max_workers)
@@ -602,6 +604,7 @@ def create_relationship(
 
 
 def try_embed_texts(texts: List[str], model: Optional[str] = None, expected_dim: Optional[int] = None, max_retries: int = 3) -> Optional[List[List[float]]]:
+    """Best-effort embedding wrapper that retries and returns None on repeated failures."""
     for attempt in range(max_retries):
         try:
             return embed_texts(texts, model=model, expected_dim=expected_dim)
@@ -614,6 +617,7 @@ def try_embed_texts(texts: List[str], model: Optional[str] = None, expected_dim:
 def embed_texts(
     texts: List[str], model: Optional[str] = None, expected_dim: Optional[int] = None
 ) -> List[List[float]]:
+    """Embed a batch of texts, validating vector dimensionality."""
     api_key_env = "EMBEDDING_API_KEY" if os.getenv("EMBEDDING_API_KEY") else "MODEL_API_KEY"
     base_url_env = "EMBEDDING_BASE_URL" if os.getenv("EMBEDDING_BASE_URL") else "MODEL_BASE_URL"
     client = openai_client(api_key_env=api_key_env, base_url_env=base_url_env)
@@ -638,6 +642,7 @@ def ingest_text(
     source_last_modified: Optional[str] = None,
     source_name: Optional[str] = None,
 ) -> Dict[str, int]:
+    """Chunk text, extract entities/relations, and persist them into Neo4j."""
     chunks = chunk_text(text)
     logger.info("got chunks: %s", len(chunks or []))
 

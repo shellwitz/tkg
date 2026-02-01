@@ -40,15 +40,18 @@ def _validate_date(date_str: Optional[str]) -> Optional[str]:
 
 
 def _month_range(year: int, month: int) -> Tuple[str, str]:
+    """Return ISO date bounds for a given month."""
     end_day = calendar.monthrange(year, month)[1]
     return f"{year}-{month:02d}-01", f"{year}-{month:02d}-{end_day:02d}"
 
 
 def _year_range(year: int) -> Tuple[str, str]:
+    """Return ISO date bounds for a given year."""
     return f"{year}-01-01", f"{year}-12-31"
 
 
 def _quarter_range(year: int, quarter: int) -> Tuple[str, str]:
+    """Return ISO date bounds for a given quarter (Q1-Q4)."""
     start_month = 3 * (quarter - 1) + 1
     end_month = start_month + 2
     end_day = calendar.monthrange(year, end_month)[1]
@@ -137,6 +140,7 @@ def _split_to_range(text: str) -> Optional[Tuple[str, str]]:
 
 
 def parse_timestamp_range(name: str) -> TimestampRange:
+    """Parse a timestamp string into start/end ISO date bounds when possible."""
     name = name.strip()
     if not name:
         return TimestampRange(None, None)

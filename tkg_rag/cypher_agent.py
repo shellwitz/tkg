@@ -18,6 +18,7 @@ def load_effective_schema_from_container(
     container: str | None = None,
     timeout_s: float = 5.0,
 ) -> str:
+    """Load the effective schema text (including runtime vector indexes) from Neo4j container."""
     target = container or os.getenv("TKG_NEO4J_CONTAINER", "tkg-neo4j")
     try:
         raw = subprocess.check_output(
@@ -39,6 +40,7 @@ def _run_introspection_query(session, cypher: str, timeout_s: float) -> List[Dic
 
 
 def fetch_db_introspection(driver, timeout_s: float = 5.0) -> Dict[str, Any]:
+    """Collect labels, relationship types, keys, indexes, and constraints for prompt grounding."""
     with driver.session(default_access_mode=READ_ACCESS) as session:
         labels = [row["label"] for row in _run_introspection_query(session, "CALL db.labels()", timeout_s)]
         relationship_types = [
@@ -96,6 +98,7 @@ def run_readonly_query(
     timeout_s: float = 15.0,
     get_embedding: Optional[Callable[[], List[float]]] = None,
 ) -> List[Dict[str, Any]]:
+    """Execute a read-only query with optional lazy embedding injection."""
     params = dict(parameters or {})
     # Lazy embedding: only compute if the query uses $question_embedding
     if get_embedding is not None and "$question_embedding" in cypher:
@@ -171,6 +174,7 @@ def run_cypher_agent(
     max_steps: int = 5,
     log_path: str | None = None,
 ) -> Dict[str, Any]:
+    """Run the LLM-driven Cypher agent until it returns a FINAL answer or max steps is reached."""
     if not (model or LLM_MODEL):
         raise RuntimeError("LLM_MODEL is not set.")
     schema_text = load_effective_schema_from_container(container=container)

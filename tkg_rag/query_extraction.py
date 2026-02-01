@@ -53,6 +53,7 @@ def _parse_query_output(raw: str, tuple_delimiter: str, record_delimiter: str) -
 
 
 def extract_query_entities(question: str) -> List[QueryEntity]:
+    """Use the LLM to extract entities and time expressions from a question."""
     if not LLM_MODEL:
         raise RuntimeError("LLM_MODEL is not set.")
     system_prompt, user_prompt_template, delimiters = _build_query_prompts()

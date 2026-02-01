@@ -6,6 +6,7 @@ from .settings import LLM_MODEL
 
 
 def generate_answer(question: str, context: str) -> str:
+    """Generate a final answer given a question and retrieved context."""
     if not LLM_MODEL:
         raise RuntimeError("LLM_MODEL is not set.")
     client = openai_client()

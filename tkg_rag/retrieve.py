@@ -72,6 +72,7 @@ def _merge_time_ranges(ranges: List[TimestampRange]) -> TimestampRange:
 
 
 def extract_query_entities_and_time(question: str) -> Tuple[List[QueryEntity], TimestampRange]:
+    """Extract non-time entities plus a merged time range from the question."""
     entities = extract_query_entities(question)
     time_ranges = [parse_timestamp_range(e.name) for e in entities if is_time_entity(e.entity_type)]
     time_range = _merge_time_ranges([r for r in time_ranges if r.start_date or r.end_date])
@@ -95,6 +96,7 @@ def search_relations(
     k: int,
     min_score: float,
 ) -> List[Dict[str, object]]:
+    """Vector search over relation embeddings with a minimum similarity threshold."""
     query = """
     CALL db.index.vector.queryRelationships('relation_embedding', $k, $embedding)
     YIELD relationship, score
@@ -125,6 +127,7 @@ def search_chunks(
     k: int,
     min_score: float,
 ) -> List[Dict[str, object]]:
+    """Vector search over chunk embeddings with a minimum similarity threshold."""
     query = """
     CALL db.index.vector.queryNodes('chunk_embedding', $k, $embedding)
     YIELD node, score
@@ -137,6 +140,7 @@ def search_chunks(
 
 
 def link_entities_bm25(tx, entities: List[QueryEntity]) -> List[str]:
+    """Match query entities to KG entity ids using full-text (BM25) + IoU filtering."""
     entity_ids: List[str] = []
     for entity in entities:
         query = """
@@ -173,6 +177,7 @@ def link_entities_bm25(tx, entities: List[QueryEntity]) -> List[str]:
 
 
 def fetch_entity_node_ids(tx, entity_ids: List[str]) -> List[int]:
+    """Resolve KG entity ids to internal Neo4j node ids."""
     if not entity_ids:
         return []
     query = """
@@ -188,6 +193,7 @@ def edges_between_node_ids(
     tx,
     node_ids: Iterable[int],
 ) -> List[Dict[str, object]]:
+    """Fetch all edges between the provided node ids."""
     ids = list(node_ids)
     if not ids:
         return []
@@ -218,6 +224,7 @@ def edges_for_entities(
     entity_ids: Iterable[str],
     time_range: TimestampRange,
 ) -> List[Dict[str, object]]:
+    """Fetch time-filtered edges incident to the provided entities."""
     ids = list(entity_ids)
     if not ids:
         return []
@@ -566,6 +573,7 @@ def retrieve_chunks_with_ppr(
     max_edges: int,
     max_chunks: int,
 ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    """Score edges with PPR and aggregate top chunks linked to those edges."""
     relation_hits = session.execute_read(
         search_relations,
         query_embedding,
@@ -649,6 +657,7 @@ def retrieve_chunks_with_ppr(
     return scored_edges, chunks
 
 def vector_search(session, query_embedding: List[float], max_chunks: int) -> List[Dict[str, object]]:
+    """Return top chunks by vector similarity."""
     chunk_hits = session.execute_read(
         search_chunks,
         query_embedding,
@@ -670,6 +679,7 @@ def vector_search(session, query_embedding: List[float], max_chunks: int) -> Lis
     return chunks
 
 def format_chunk_context(items: List[Dict[str, object]]) -> str:
+        """Format chunk payloads into a single prompt-ready context string."""
         chunk_formatter = """---NEW CHUNK ({chunk_id})---
         {chunk_content}
         {chunk_source}
@@ -691,6 +701,7 @@ def format_chunk_context(items: List[Dict[str, object]]) -> str:
         return context
 
 def retrieve(question: str, use_only_vec_search: bool= False) -> Dict[str, object]:
+    """Retrieve chunks/edges for a question and return the fused context payload."""
     entities, time_range = extract_query_entities_and_time(question)
     driver = _neo4j_driver()
     with driver.session() as session:
