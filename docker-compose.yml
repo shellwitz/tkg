@@ -21,4 +21,4 @@ services:
       - tkg_v3:/data
 
 volumes:
-  tkg_v3: # contains 4 companies tkg_v2: #og is tkg
+  tkg_v3: # containes skx data # contains 4 companies tkg_v2: #og is tkg

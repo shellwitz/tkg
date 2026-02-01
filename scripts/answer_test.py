@@ -18,6 +18,7 @@ from tkg_rag.logging_utils import setup_logging
 from tkg_rag.answer import generate_answer
 from tkg_rag.retrieve import retrieve
 import time
+from enum import Enum
 
 logger = logging.getLogger(__name__)
 
@@ -43,16 +44,28 @@ def main() -> None:
         action="store_true",
         help="Use predefined questions for stock codes.",
     )
+
+    class RetrievalMode(str, Enum):
+        VEC_AND_EDGE_SEARCH = "vec_and_edge_search"
+        VEC_SEARCH_ONLY = "vec_search_only"
+        CYPHER_AGENT = "cypher_agent"
+
+        def __str__(self):
+            return self.value
+
     parser.add_argument(
-        "--agent",
-        action="store_true",
-        help="Use cypher agent instead of RAG for question answering"
+        "-m",
+        "--mode",
+        type=RetrievalMode,
+        choices=list(RetrievalMode),
+        default=RetrievalMode.VEC_AND_EDGE_SEARCH,
+        help="Retrieval mode: vec_and_edge_search, vec_search or cypher_agent",
     )
+
     args = parser.parse_args()
 
     if args.question_stock_codes:
-        ANSWER_PATH = "/home/shellwitz/Documents/uni_stuff/nlp_uni/tkg/eval/rag_results_to_evaluate/daniel_diy_tkg_big/vec_search.jsonl"
-        #"/home/shellwitz/Documents/uni_stuff/nlp_uni/tkg_eval/rag_results_to_evaluate/daniel_diy_tkg_big/vec_and_edge_search_less_context_tkg_answers.jsonl"
+        ANSWER_PATH = f"../tkg_eval/rag_results_to_evaluate/daniel_diy_tkg/{args.mode}_answers.jsonl"
 
         with open("ect-qa/questions/local_base.jsonl", "r") as f:
             questions_raw = f.readlines()
@@ -76,7 +89,7 @@ def main() -> None:
         with open(ANSWER_PATH, "w") as f:
             start_ts = time.time()
             for i, question_obj in enumerate(question_objs):
-                if args.agent:
+                if args.mode == RetrievalMode.CYPHER_AGENT:
                     result = run_cypher_agent(
                         question=question_obj["question"],
                         neo4j_uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
@@ -90,7 +103,7 @@ def main() -> None:
                     question_obj["predicted_answer"] = result.get("answer", "")
                     #question_obj["context"] = json.dumps(result, indent=2)
                 else:
-                    result = retrieve(question_obj["question"], use_only_vec_search=True)
+                    result = retrieve(question_obj["question"], use_only_vec_search=(args.mode == RetrievalMode.VEC_SEARCH_ONLY))
                     answer = generate_answer(result["question"], result["context"])
                     logger.info("generated answer: %s/%s", i + 1, len(question_objs))
                     question_obj["predicted_answer"]  = answer
@@ -101,7 +114,7 @@ def main() -> None:
             elapsed = end_ts - start_ts
             logger.info("RAG questions eval from question indices took time: %.2f seconds", elapsed)
     else:
-        if args.agent:
+        if args.mode == RetrievalMode.CYPHER_AGENT:
             result = run_cypher_agent(
                 question=args.question,
                 neo4j_uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),

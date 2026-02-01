@@ -419,45 +419,58 @@ def rrf_fuse(
 
 def format_context(items: List[Dict[str, object]]) -> Tuple[str, dict]:
     chunk_and_edge_map = {}
-    inv_chunk_map = {}
+    inv_chunk_map: Dict[object, int] = {}
+    chunk_line_map: Dict[object, int] = {}
     if not items:
         return "No matching context found.", {}
-    lines: List[str] = ["Context from a temporal knowledge graph. E stands for edge c for chunk with an id [e_id:N] or [c_id:chunkN] \n"]
+    header = (
+        "Context from a temporal knowledge graph. E stands for edge c for chunk with an id[e_id:N] or [c_id:N] "
+    )
+    lines: List[str] = [header]
 
     edge_count = 1
     chunk_count = 1
-    source_count = 1
+    has_output = False
     for item in items:
         if item["kind"] == "chunk":
             text = item["text"].strip()
             if not text:
                 continue
-            
+
             chunk_id = item["chunk_id"]
             new_chunk_id = inv_chunk_map.get(chunk_id)
             if new_chunk_id is None:
-                chunk_label = f"chunk{chunk_count}"
-                chunk_and_edge_map[chunk_label] = chunk_id
-                new_chunk_id = chunk_label
+                chunk_and_edge_map[str(chunk_count)] = chunk_id
+                new_chunk_id = chunk_count
                 inv_chunk_map[chunk_id] = new_chunk_id
-                chunk_count +=1
+                chunk_count += 1
+
+            if not has_output:
+                lines.append("")
+                has_output = True
 
             #source_name = (item.get("source_name") or "").strip()
             #source_str = f" | source: {source_name}" if source_name else ""
-            lines.append(f"[c_id:{new_chunk_id}] {text}") #{source_str}")
+            lines.append(f"[c_id:{new_chunk_id}] {text}")  # {source_str})
+            chunk_line_map[chunk_id] = len(lines) - 1
         else:
             rel_text = item["relation_text"].strip()
+            if not rel_text:
+                continue
 
             chunk_ids = item["chunk_ids"]
             chunk_id = chunk_ids[0] if chunk_ids else "unknown"
             new_chunk_id = inv_chunk_map.get(chunk_id)
 
             if new_chunk_id is None:
-                chunk_label = f"chunk{chunk_count}"
-                chunk_and_edge_map[chunk_label] = chunk_id
-                new_chunk_id = chunk_label
+                chunk_and_edge_map[str(chunk_count)] = chunk_id
+                new_chunk_id = chunk_count
                 inv_chunk_map[chunk_id] = new_chunk_id
-                chunk_count +=1
+                chunk_count += 1
+
+            if not has_output:
+                lines.append("")
+                has_output = True
 
             edge_id = item["rel_id"]
             chunk_and_edge_map[f"edge{edge_count}"] = edge_id
@@ -474,6 +487,9 @@ def format_context(items: List[Dict[str, object]]) -> Tuple[str, dict]:
                 # f"{time_str}\n"
                 # f"source: {new_chunk_id}"
             )
+            source_line_id = chunk_line_map.get(chunk_id)
+            if source_line_id is not None:
+                lines.append(f"source_id: {source_line_id}")
 
             edge_count += 1
 
@@ -680,12 +696,15 @@ def retrieve(question: str, use_only_vec_search: bool= False) -> Dict[str, objec
     with driver.session() as session:
         query_embedding = embed_texts([question])[0]
         if use_only_vec_search:
-            chunks = vector_search(session, query_embedding, 4)
+            max_chunks = 4
+            chunks = vector_search(session, query_embedding, max_chunks)
             context = format_chunk_context(chunks)
         else:
-            #_, chunks = retrieve_chunks_with_ppr(session, query_embedding, entities, time_range, max_edges, max_chunks)
-            chunks = vector_search(session, query_embedding, 1)
-            edges = edge_search(session, query_embedding, entities, time_range, 25)
+            #_, chunks = retrieve_chunks_with_ppr(session, query_embedding, entities, time_range, max_edges, max_chunks) similar method to the one used in the paper
+            max_chunks = 1
+            chunks = vector_search(session, query_embedding, max_chunks)
+            max_edges = 25
+            edges = edge_search(session, query_embedding, entities, time_range, max_edges)
             fused = rrf_fuse(edges, 
                             chunks,
                             _rrf_k())

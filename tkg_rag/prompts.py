@@ -4,10 +4,15 @@ TEMPORAL_ENTITY_EXTRACTION_SYS_PROMPT = """
 Given a text document that is potentially relevant to this activity and a list of entity types, as well as their relationships..
 
 -Steps-
-1. Identify all timestamp entities, identify all time expressions that indicate specific periods, financial quarters, or relevant time references. Normalize ALL time expressions into date ranges using the standard format {timestamp_format}. Represent ranges as "<start_date> to <end_date>" where each date is YYYY-MM-DD. If either the start or end date is unknown, omit it (e.g., "2021-05-01 to " or " to 2021-05-31"). Always output a range even when a single date is given (use the same date for start and end).
+1. Identify all timestamp entities, identify all time expressions that indicate specific periods, financial quarters, or relevant time references.
+Normalize ALL time expressions into date ranges using the standard format {timestamp_format}.
+Represent ranges as "<start_date> to <end_date>" where each date is YYYY-MM-DD.
+If either the start or end date is unknown, omit it (e.g., "2021-05-01 to " or " to 2021-05-31").
+Always output a range even when a single date is given (use the same date for start and end).
 Examples:
 - "Q1 2021" -> "2021-01-01 to 2021-03-31"
 - "August to November 2023" -> "2023-08-01 to 2023-11-30"
+- Open-ended bound for "till/until 2022": " to 2022-12-31"
 Each timestamp entity should follow this format:
 - entity_name: normalized date range string as above
 - entity_type: {timestamp_types}
@@ -39,14 +44,14 @@ By September 18, 2008, the U.S. Federal Reserve announced an $85 billion bailout
 Investors faced heavy losses, and governments worldwide scrambled to implement emergency measures.
 ################
 Output:
-("entity"{tuple_delimiter}"2008-09-15"{tuple_delimiter}"date"){record_delimiter}  
-("entity"{tuple_delimiter}"2008-09-18"{tuple_delimiter}"date"){record_delimiter}  
+("entity"{tuple_delimiter}"2008-09-15 to 2008-09-15"{tuple_delimiter}"date"){record_delimiter}  
+("entity"{tuple_delimiter}"2008-09-18 to 2008-09-18"{tuple_delimiter}"date"){record_delimiter}  
 ("entity"{tuple_delimiter}"Lehman Brothers"{tuple_delimiter}"company"){record_delimiter}   
 ("entity"{tuple_delimiter}"Global Financial Crisis"{tuple_delimiter}"event"){record_delimiter}  
 ("entity"{tuple_delimiter}"U.S. Federal Reserve"{tuple_delimiter}"government"){record_delimiter}  
 ("entity"{tuple_delimiter}"AIG"{tuple_delimiter}"company"){record_delimiter}
-("relationship"{tuple_delimiter}"2008-09-15"{tuple_delimiter}"Lehman Brothers"{tuple_delimiter}"Global Financial Crisis"{tuple_delimiter}"Lehman Brothers filed for bankruptcy, triggering the largest financial collapse in U.S. history and sparking a global financial crisis."){record_delimiter}
-("relationship"{tuple_delimiter}"2008-09-18"{tuple_delimiter}"U.S. Federal Reserve"{tuple_delimiter}"AIG"{tuple_delimiter}"To contain the spreading financial crisis, the U.S. Federal Reserve provided an $85 billion bailout to AIG to prevent further systemic collapse.")
+("relationship"{tuple_delimiter}"2008-09-15 to 2008-09-15"{tuple_delimiter}"Lehman Brothers"{tuple_delimiter}"Global Financial Crisis"{tuple_delimiter}"Lehman Brothers filed for bankruptcy, triggering the largest financial collapse in U.S. history and sparking a global financial crisis."){record_delimiter}
+("relationship"{tuple_delimiter}"2008-09-18 to 2008-09-18"{tuple_delimiter}"U.S. Federal Reserve"{tuple_delimiter}"AIG"{tuple_delimiter}"To contain the spreading financial crisis, the U.S. Federal Reserve provided an $85 billion bailout to AIG to prevent further systemic collapse.")
 """
 
 TEMPORAL_ENTITY_EXTRACTION_FOLLOWUP_PROMPT = """
@@ -62,7 +67,14 @@ Extract only the entities and time expressions needed to interpret a user questi
 
 -Guidelines-
 1. Identify time expressions if present (date, date_range, quarter, year).
-   Use standard ISO-like formats: {timestamp_format}.
+   Normalize ALL time expressions into date ranges using the standard format {timestamp_format}.
+   Represent ranges as "<start_date> to <end_date>" where each date is YYYY-MM-DD.
+   If either the start or end date is unknown, omit it (e.g., "2021-05-01 to " or " to 2021-05-31").
+   Always output a range even when a single date is given (use the same date for start and end).
+   Examples:
+   - "Q1 2021" -> "2021-01-01 to 2021-03-31"
+   - "August to November 2023" -> "2023-08-01 to 2023-11-30"
+   - Open-ended bound for "till/until YEAR": " to 2021-12-31"
 2. Identify the main entities referenced in the question. Use the provided entity types list.
 3. Be minimal and precise. Do not invent entities or time ranges.
 
@@ -76,7 +88,12 @@ Tuple format:
 Query: "What did Microsoft report in Q1 2020?"
 Output:
 ("entity"{tuple_delimiter}"Microsoft"{tuple_delimiter}"company"){record_delimiter}
-("entity"{tuple_delimiter}"2020-Q1"{tuple_delimiter}"quarter")
+("entity"{tuple_delimiter}"2020-01-01 to 2020-03-31"{tuple_delimiter}"quarter")
+
+Query: "Who was CEO of Acme until 2021?"
+Output:
+("entity"{tuple_delimiter}"Acme"{tuple_delimiter}"company"){record_delimiter}
+("entity"{tuple_delimiter}" to 2021-12-31"{tuple_delimiter}"year")
 """
 
 QUERY_ENTITY_TIME_EXTRACTION_USER_PROMPT = """

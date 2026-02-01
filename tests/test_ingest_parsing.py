@@ -115,6 +115,18 @@ class TestParseTimestampRange(unittest.TestCase):
             parse_timestamp_range("Aug 2023 to Nov 2023"),
         )
 
+    def test_parses_open_ended_range_with_only_end(self) -> None:
+        self.assertEqual(
+            TimestampRange(None, "2022-12-31"),
+            parse_timestamp_range(" to 2022-12-31"),
+        )
+
+    def test_parses_open_ended_range_with_only_start(self) -> None:
+        self.assertEqual(
+            TimestampRange("2021-01-01", None),
+            parse_timestamp_range("2021-01-01 to "),
+        )
+
     def test_rejects_invalid_quarter(self) -> None:
         self.assertEqual(
             TimestampRange(None, None),

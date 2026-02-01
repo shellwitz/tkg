@@ -143,6 +143,8 @@ def parse_timestamp_range(name: str) -> TimestampRange:
 
     if _ISO_DATE_RE.match(name):
         validated = _validate_date(name)
+        if validated is None:
+            return TimestampRange(name, name)
         return TimestampRange(validated, validated)
 
     ym_match = _ISO_YEAR_MONTH_RE.match(name)
